@@ -39,6 +39,9 @@ case "status":
 case "record":
     Record.run(args: Array(args.dropFirst()))
 
+case "flows":
+    Flows.run(args: Array(args.dropFirst()))
+
 case "version", "--version", "-v":
     print("Flow42 v\(Flow42Core.version)")
 
@@ -90,6 +93,7 @@ func printUsage() {
       doctor    Diagnose issues and suggest fixes
       status    Quick health check
       record    Record a flow to ~/.openclaw/flow42/recipes/
+      flows     List recordings in ~/.openclaw/flow42/recipes/
       version   Print version
 
     Get started:

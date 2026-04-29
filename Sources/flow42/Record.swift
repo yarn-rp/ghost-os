@@ -17,7 +17,8 @@ import Foundation
 enum Record {
 
     static func run(args: [String]) {
-        let description = parseDescription(args)
+        let description = parseFlag(args, "--description", "-d")
+        let provider = parseFlag(args, "--provider", "-p") ?? "openclaw"
         let slug = makeSlug()
         let dir = recipesRoot().appendingPathComponent(slug).path
 
@@ -31,6 +32,14 @@ enum Record {
             exit(1)
         }
 
+        // Seed the agent prompts now (before recording starts) so that even
+        // a Ctrl-C-killed recording leaves a usable .agent/ directory behind.
+        do {
+            try SeedPrompts.seed(into: dir, provider: provider)
+        } catch {
+            fputs("warning: failed to seed agent prompts: \(error)\n", stderr)
+        }
+
         let recorder = LearningRecorder.shared
         if let err = recorder.start(taskDescription: description, recordingDir: dir) {
             fputs("error: \(err.localizedDescription)\n", stderr)
@@ -42,6 +51,7 @@ enum Record {
         if let description {
             print("Task: \(description)")
         }
+        print("Provider: \(provider)")
         print("Type `done` and press Enter to stop.")
 
         // Block on stdin. readLine() returns when the user hits Enter; we
@@ -106,17 +116,12 @@ enum Record {
 
     // MARK: - Helpers
 
-    private static func parseDescription(_ args: [String]) -> String? {
+    private static func parseFlag(_ args: [String], _ long: String, _ short: String) -> String? {
         var i = 0
         while i < args.count {
-            switch args[i] {
-            case "--description", "-d":
-                if i + 1 < args.count {
-                    return args[i + 1]
-                }
+            if args[i] == long || args[i] == short {
+                if i + 1 < args.count { return args[i + 1] }
                 return nil
-            default:
-                break
             }
             i += 1
         }

@@ -27,6 +27,9 @@ let package = Package(
                 .product(name: "AXorcist", package: "AXorcist"),
             ],
             path: "Sources/Flow42Core",
+            resources: [
+                .copy("Resources/prompts"),
+            ],
             swiftSettings: concurrencySettings,
             linkerSettings: [.linkedFramework("ScreenCaptureKit")]
         ),
