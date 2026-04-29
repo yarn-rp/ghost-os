@@ -180,8 +180,8 @@ nonisolated enum EventHandlers {
 
     /// Get AX context for the currently focused element (typing context).
     private static func focusedFieldContext() -> ElementContext? {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        guard let app = FrontmostApp.effective() else { return nil }
+        let appEl = AXUIElementCreateApplication(app.pid)
         guard let fv = axAttr(appEl, kAXFocusedUIElementAttribute) else { return nil }
         let el = fv as! AXUIElement  // CF type: downcast always succeeds
         let role = axAttr(el, kAXRoleAttribute) as? String
@@ -198,8 +198,8 @@ nonisolated enum EventHandlers {
     /// Three-tier check: (1) AXSecureTextField role, (2) subrole,
     /// (3) name heuristics for Chrome which renders password fields as AXTextField.
     private static func isSecureFieldFocused() -> Bool {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return false }
-        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        guard let app = FrontmostApp.effective() else { return false }
+        let appEl = AXUIElementCreateApplication(app.pid)
         guard let fv = axAttr(appEl, kAXFocusedUIElementAttribute) else { return false }
         let focused = fv as! AXUIElement  // CF type: downcast always succeeds
 
@@ -225,27 +225,25 @@ nonisolated enum EventHandlers {
     }
 
     static func currentAppInfo() -> (name: String, bundleId: String) {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return ("Unknown", "") }
-        return (app.localizedName ?? "Unknown", app.bundleIdentifier ?? "")
+        FrontmostApp.nameAndBundle()
     }
 
     static func currentWindowTitle() -> String? {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        guard let app = FrontmostApp.effective() else { return nil }
+        let appEl = AXUIElementCreateApplication(app.pid)
         guard let wv = axAttr(appEl, kAXFocusedWindowAttribute) else { return nil }
         let win = wv as! AXUIElement  // CF type: downcast always succeeds
         return (axAttr(win, kAXTitleAttribute) as? String).map { String($0.prefix(200)) }
     }
 
     static func currentURL() -> String? {
-        guard let app = NSWorkspace.shared.frontmostApplication,
-              let bid = app.bundleIdentifier else { return nil }
+        guard let app = FrontmostApp.effective() else { return nil }
         let browsers: Set<String> = [
             "com.google.Chrome", "com.apple.Safari", "company.thebrowser.Browser",
             "org.mozilla.firefox", "com.brave.Browser", "com.microsoft.edgemac",
         ]
-        guard browsers.contains(bid) else { return nil }
-        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        guard browsers.contains(app.bundleId) else { return nil }
+        let appEl = AXUIElementCreateApplication(app.pid)
         guard let wv = axAttr(appEl, kAXFocusedWindowAttribute) else { return nil }
         let win = wv as! AXUIElement  // CF type: downcast always succeeds
         return findURLField(in: win, depth: 0)

@@ -18,10 +18,8 @@ nonisolated enum AppSwitchDetector {
         recorder: LearningRecorder,
         lastRecordedApp: inout String
     ) -> Bool {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication,
-              let name = frontApp.localizedName else {
-            return false
-        }
+        guard let frontApp = FrontmostApp.effective() else { return false }
+        let name = frontApp.name
 
         // Skip the first call (initial app detection, not a user-initiated switch)
         guard name != lastRecordedApp, !lastRecordedApp.isEmpty else {
@@ -31,7 +29,7 @@ nonisolated enum AppSwitchDetector {
             return false
         }
 
-        let bundleId = frontApp.bundleIdentifier ?? ""
+        let bundleId = frontApp.bundleId
         let previousApp = lastRecordedApp
         lastRecordedApp = name
 
