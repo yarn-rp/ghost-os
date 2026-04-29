@@ -42,6 +42,12 @@ case "record":
 case "flows":
     Flows.run(args: Array(args.dropFirst()))
 
+case "native-host":
+    NativeHost.run()
+
+case "install":
+    Install.run(args: Array(args.dropFirst()))
+
 case "version", "--version", "-v":
     print("Flow42 v\(Flow42Core.version)")
 
@@ -88,13 +94,15 @@ func printUsage() {
     Usage: flow42 <command>
 
     Commands:
-      mcp       Start the MCP server (used by Claude Code)
-      setup     Interactive setup wizard (first-time configuration)
-      doctor    Diagnose issues and suggest fixes
-      status    Quick health check
-      record    Record a flow to ~/.openclaw/flow42/recipes/
-      flows     List recordings in ~/.openclaw/flow42/recipes/
-      version   Print version
+      mcp           Start the MCP server (used by Claude Code)
+      setup         Interactive setup wizard (first-time configuration)
+      doctor        Diagnose issues and suggest fixes
+      status        Quick health check
+      record        Record a flow to ~/.openclaw/flow42/recipes/
+      flows         List recordings in ~/.openclaw/flow42/recipes/
+      install       Register the Chrome native-messaging manifest
+      native-host   Run as a Chrome native-messaging host (called by Chrome)
+      version       Print version
 
     Get started:
       flow42 setup     Configure permissions and MCP

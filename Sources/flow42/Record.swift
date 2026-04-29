@@ -47,6 +47,10 @@ enum Record {
             exit(1)
         }
 
+        // Mark this recording active so the chrome native-messaging host
+        // (a separate process) knows where to drop DOM-augment events.
+        try? ActiveRecording.set(slug: slug, dir: dir)
+
         print("Recording → \(dir)")
         if let description {
             print("Task: \(description)")
@@ -65,6 +69,10 @@ enum Record {
             }
             print("(type `done` to stop)")
         }
+
+        // Clear the marker before serialising so any in-flight DOM frames
+        // from the extension stop landing in this recording's dom-events log.
+        ActiveRecording.clear()
 
         // Stop, serialise, and persist.
         switch recorder.stop() {
