@@ -18,7 +18,6 @@ enum Record {
 
     static func run(args: [String]) {
         let description = parseFlag(args, "--description", "-d")
-        let provider = parseFlag(args, "--provider", "-p") ?? "openclaw"
         let slug = makeSlug()
         let dir = recipesRoot().appendingPathComponent(slug).path
 
@@ -35,7 +34,7 @@ enum Record {
         // Seed the agent prompts now (before recording starts) so that even
         // a Ctrl-C-killed recording leaves a usable .agent/ directory behind.
         do {
-            try SeedPrompts.seed(into: dir, provider: provider)
+            try SeedPrompts.seed(into: dir)
         } catch {
             fputs("warning: failed to seed agent prompts: \(error)\n", stderr)
         }
@@ -55,7 +54,6 @@ enum Record {
         if let description {
             print("Task: \(description)")
         }
-        print("Provider: \(provider)")
         print("Type `done` and press Enter to stop.")
 
         // Block on stdin. readLine() returns when the user hits Enter; we

@@ -14,7 +14,7 @@ The user message gave you the absolute path to the recording directory. Inside i
     step-NNN.annotated.jpg       # same, with click marker (for clicks only)
   .agent/
     clarify-prompt.md            # this file
-    generate-prompt-<provider>.md  # phase-2 prompt for your platform
+    generate-prompt.md           # phase-2 prompt
 ```
 
 `flow.json` has rich per-step context: action type (click / typeText / hotkey / scroll / appSwitch), accessibility-tree element data (role, title, identifier; for browser steps also dom_id / dom_classes), the window title and URL, and the path to the matching screenshot.
