@@ -9,37 +9,37 @@ let concurrencySettings: [SwiftSetting] = [
 ]
 
 let package = Package(
-    name: "GhostOS",
+    name: "Flow42",
     platforms: [
         .macOS(.v14),
     ],
     products: [
-        .library(name: "GhostOS", targets: ["GhostOS"]),
-        .executable(name: "ghost", targets: ["ghost"]),
+        .library(name: "Flow42Core", targets: ["Flow42Core"]),
+        .executable(name: "flow42", targets: ["flow42"]),
     ],
     dependencies: [
         .package(url: "https://github.com/steipete/AXorcist.git", from: "0.1.0"),
     ],
     targets: [
         .target(
-            name: "GhostOS",
+            name: "Flow42Core",
             dependencies: [
                 .product(name: "AXorcist", package: "AXorcist"),
             ],
-            path: "Sources/GhostOS",
+            path: "Sources/Flow42Core",
             swiftSettings: concurrencySettings,
             linkerSettings: [.linkedFramework("ScreenCaptureKit")]
         ),
         .executableTarget(
-            name: "ghost",
-            dependencies: ["GhostOS"],
-            path: "Sources/ghost",
+            name: "flow42",
+            dependencies: ["Flow42Core"],
+            path: "Sources/flow42",
             swiftSettings: concurrencySettings
         ),
         .testTarget(
-            name: "GhostOSTests",
-            dependencies: ["GhostOS"],
-            path: "Tests/GhostOSTests",
+            name: "Flow42CoreTests",
+            dependencies: ["Flow42Core"],
+            path: "Tests/Flow42CoreTests",
             swiftSettings: concurrencySettings
         ),
     ],
