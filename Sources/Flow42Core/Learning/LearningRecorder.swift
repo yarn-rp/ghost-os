@@ -237,23 +237,33 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
     // MARK: - Keystroke Coalescing
 
     /// Flush pending keystrokes into a typeText action. Caller must hold the lock.
-    internal func flushPendingKeystrokes(into session: inout LearningSession) {
+    internal func flushPendingKeystrokes(
+        into session: inout LearningSession,
+        screenshotPath: String? = nil
+    ) {
         guard !pendingKeystrokes.isEmpty else { return }
         session.actions.append(ObservedAction(
             timestamp: pendingKeystrokeTimestamp,
             action: .typeText(text: pendingKeystrokes),
             appName: pendingKeystrokeApp, appBundleId: pendingKeystrokeBundleId,
             windowTitle: pendingKeystrokeWindow, url: pendingKeystrokeUrl,
-            elementContext: pendingKeystrokeElement
+            elementContext: pendingKeystrokeElement,
+            screenshotPath: screenshotPath
         ))
         pendingKeystrokes = ""; pendingKeystrokeElement = nil
         invalidateTimer(&keystrokeFlushTimer)
     }
 
     internal func flushPendingKeystrokesOnLearningThread() {
+        // Snapshot the topmost window first (slow I/O), THEN take the lock
+        // and append. We re-check session-validity inside the lock; if the
+        // session ended between the slot read and the lock, just drop the
+        // captured file's path on the floor.
+        let path = captureNonClickScreenshot()
         os_unfair_lock_lock(&lock)
         guard var s = session else { os_unfair_lock_unlock(&lock); return }
-        flushPendingKeystrokes(into: &s); session = s
+        flushPendingKeystrokes(into: &s, screenshotPath: path)
+        session = s
         os_unfair_lock_unlock(&lock)
     }
 
@@ -272,24 +282,42 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
     // MARK: - Scroll Coalescing
 
     /// Flush pending scroll into a single scroll action. Caller must hold the lock.
-    internal func flushPendingScroll(into session: inout LearningSession) {
+    internal func flushPendingScroll(
+        into session: inout LearningSession,
+        screenshotPath: String? = nil
+    ) {
         guard pendingScrollDeltaX != 0 || pendingScrollDeltaY != 0 else { return }
         session.actions.append(ObservedAction(
             timestamp: pendingScrollTimestamp,
             action: .scroll(deltaX: pendingScrollDeltaX, deltaY: pendingScrollDeltaY,
                            x: pendingScrollX, y: pendingScrollY),
             appName: pendingScrollApp, appBundleId: pendingScrollBundleId,
-            windowTitle: nil, url: nil, elementContext: nil
+            windowTitle: nil, url: nil, elementContext: nil,
+            screenshotPath: screenshotPath
         ))
         pendingScrollDeltaX = 0; pendingScrollDeltaY = 0
         invalidateTimer(&scrollFlushTimer)
     }
 
     internal func flushPendingScrollOnLearningThread() {
+        let path = captureNonClickScreenshot()
         os_unfair_lock_lock(&lock)
         guard var s = session else { os_unfair_lock_unlock(&lock); return }
-        flushPendingScroll(into: &s); session = s
+        flushPendingScroll(into: &s, screenshotPath: path)
+        session = s
         os_unfair_lock_unlock(&lock)
+    }
+
+    /// Helper — take a single (non-annotated) screenshot of whatever's
+    /// topmost on screen, slot it under the next step index. Acquires the
+    /// lock briefly to read state, then releases it before doing the slow
+    /// file write.
+    private func captureNonClickScreenshot() -> String? {
+        guard let slot = nextScreenshotSlot() else { return nil }
+        return LearningScreenshot.capture(
+            stepIndex: slot.stepIndex,
+            recordingDir: slot.recordingDir
+        )
     }
 
     internal func scheduleScrollFlushTimer() {

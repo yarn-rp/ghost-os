@@ -61,10 +61,22 @@ nonisolated enum EventHandlers {
             let actionType: ObservedActionType = !mods.isEmpty
                 ? .hotkey(modifiers: mods, keyName: keyName)
                 : .keyPress(keyCode: keyCode, keyName: keyName, modifiers: [])
+
+            // Screenshot the visually frontmost window before the keystroke
+            // takes effect (same convention as handleMouseDown).
+            var rawPath: String?
+            if let slot = recorder.nextScreenshotSlot() {
+                rawPath = LearningScreenshot.capture(
+                    stepIndex: slot.stepIndex,
+                    recordingDir: slot.recordingDir
+                )
+            }
+
             recorder.appendAction(ObservedAction(
                 timestamp: mach_absolute_time(), action: actionType,
                 appName: app, appBundleId: bid,
-                windowTitle: currentWindowTitle(), url: nil, elementContext: nil
+                windowTitle: currentWindowTitle(), url: nil, elementContext: nil,
+                screenshotPath: rawPath
             ))
         }
     }
@@ -79,21 +91,19 @@ nonisolated enum EventHandlers {
         let button: String = (type == .leftMouseDown) ? "left" : "right"
         let clicks = Int(event.getIntegerValueField(.mouseEventClickState))
         let (app, bid) = currentAppInfo()
-        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-
-        // Snap a screenshot of the focused window before the click lands so
-        // the recording shows the state the user acted on. Best-effort —
-        // a missed screenshot must never break recording.
+        // Snap a screenshot of whatever's visually frontmost before the click
+        // lands. Capturing by topmost on-screen window (not by pid) avoids
+        // flaky frontmost-app detection — NSWorkspace can return Universal
+        // Control, the recorder's parent terminal, etc. instead of the app
+        // the user is actually clicking in.
         var rawPath: String?
         var annotatedPath: String?
-        if let pid, let slot = recorder.nextScreenshotSlot() {
+        if let slot = recorder.nextScreenshotSlot() {
             rawPath = LearningScreenshot.capture(
-                pid: pid,
                 stepIndex: slot.stepIndex,
                 recordingDir: slot.recordingDir
             )
             annotatedPath = LearningScreenshot.capture(
-                pid: pid,
                 stepIndex: slot.stepIndex,
                 recordingDir: slot.recordingDir,
                 annotated: true,

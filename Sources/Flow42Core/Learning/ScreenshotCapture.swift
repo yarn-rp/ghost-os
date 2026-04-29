@@ -12,12 +12,17 @@ import UniformTypeIdentifiers
 
 nonisolated public enum LearningScreenshot {
 
-    /// Capture the frontmost window of the given pid, encode JPEG, write to
-    /// `<recordingDir>/screenshots/step-NNN.jpg`. Returns the path relative
-    /// to the recording dir on success, nil on any failure (we never throw —
-    /// a missed screenshot must not break recording).
+    /// Capture the topmost on-screen window (regardless of which process
+    /// owns it), encode JPEG, write to `<recordingDir>/screenshots/step-NNN.jpg`.
+    /// Returns the path relative to the recording dir on success, nil on any
+    /// failure (we never throw — a missed screenshot must not break recording).
+    ///
+    /// We deliberately don't filter by pid: NSWorkspace.shared.frontmostApplication
+    /// returns flaky values (Universal Control, the recorder's parent terminal,
+    /// transient agents) that cause us to either screenshot the wrong app or
+    /// silently fail. Capturing whatever is visually frontmost — which is what
+    /// the user is looking at — is more reliable.
     public static func capture(
-        pid: pid_t,
         stepIndex: Int,
         recordingDir: String,
         annotated: Bool = false,
@@ -25,8 +30,7 @@ nonisolated public enum LearningScreenshot {
     ) -> String? {
         guard CGPreflightScreenCaptureAccess() else { return nil }
 
-        // Find the topmost on-screen window owned by `pid`.
-        guard let windowID = topmostWindowID(forPid: pid) else { return nil }
+        guard let windowID = topmostOnScreenWindowID() else { return nil }
 
         let imageOptions: CGWindowImageOption = [.boundsIgnoreFraming]
         guard let cgImage = CGWindowListCreateImage(
@@ -72,16 +76,23 @@ nonisolated public enum LearningScreenshot {
 
     // MARK: - Helpers
 
-    private static func topmostWindowID(forPid pid: pid_t) -> CGWindowID? {
+    /// Topmost regular on-screen window. CGWindowListCopyWindowInfo with
+    /// .optionOnScreenOnly returns windows in front-to-back order; we walk
+    /// it and pick the first layer-0 window with a non-trivial size, skipping
+    /// menu bars / Dock / tiny system overlays.
+    private static func topmostOnScreenWindowID() -> CGWindowID? {
         let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID)
             as? [[CFString: Any]] else { return nil }
         for info in list {
-            guard let ownerPid = info[kCGWindowOwnerPID] as? pid_t, ownerPid == pid else { continue }
-            // Skip menu bar / tiny windows.
-            if let bounds = info[kCGWindowBounds] as? [String: Any],
-               let h = bounds["Height"] as? Double, h < 50 { continue }
+            // layer 0 is the regular app-window layer; menu bars, Dock,
+            // tooltips etc. are at higher layers.
             if let layer = info[kCGWindowLayer] as? Int, layer != 0 { continue }
+            if let bounds = info[kCGWindowBounds] as? [String: Any] {
+                let h = bounds["Height"] as? Double ?? 0
+                let w = bounds["Width"] as? Double ?? 0
+                if h < 100 || w < 100 { continue }
+            }
             if let id = info[kCGWindowNumber] as? CGWindowID { return id }
         }
         return nil

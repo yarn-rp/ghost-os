@@ -76,7 +76,7 @@ public enum LearningDispatch {
 
     // MARK: - Serialization
 
-    private static func serializeAction(_ action: ObservedAction) -> [String: Any] {
+    public static func serializeAction(_ action: ObservedAction) -> [String: Any] {
         var dict: [String: Any] = [
             "timestamp": action.timestamp,
             "app": action.appName,
@@ -85,6 +85,8 @@ public enum LearningDispatch {
         dict["window"] = action.windowTitle ?? NSNull()
         dict["url"] = action.url ?? NSNull()
         dict["element"] = action.elementContext.map { serializeElement($0) } ?? NSNull()
+        dict["screenshot"] = action.screenshotPath ?? NSNull()
+        dict["annotated_screenshot"] = action.annotatedScreenshotPath ?? NSNull()
 
         switch action.action {
         case .click(let x, let y, let button, let count):

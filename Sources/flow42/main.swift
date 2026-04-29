@@ -4,8 +4,9 @@
 //   flow42 mcp       Start the MCP server (used by Claude Code)
 //   flow42 setup     Interactive setup wizard
 //   flow42 doctor    Diagnose issues and suggest fixes
-//   ghost status    Quick health check
-//   ghost version   Print version
+//   flow42 status    Quick health check
+//   flow42 record    Record a user-driven flow to ~/.openclaw/flow42/recipes/
+//   flow42 version   Print version
 
 import AppKit
 import ApplicationServices
@@ -34,6 +35,9 @@ case "doctor":
 
 case "status":
     printStatus()
+
+case "record":
+    Record.run(args: Array(args.dropFirst()))
 
 case "version", "--version", "-v":
     print("Flow42 v\(Flow42Core.version)")
@@ -85,6 +89,7 @@ func printUsage() {
       setup     Interactive setup wizard (first-time configuration)
       doctor    Diagnose issues and suggest fixes
       status    Quick health check
+      record    Record a flow to ~/.openclaw/flow42/recipes/
       version   Print version
 
     Get started:
