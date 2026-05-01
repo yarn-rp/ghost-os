@@ -440,6 +440,15 @@ enum Record {
 
             let actionCount = actions.count + narrationCount
 
+            // Sort + renumber pass. Native + extension events go in in
+            // append order, but post-stop narration steps land last
+            // even though their timestamps are mid-recording. Run
+            // EventsFinalizer once here so the on-disk layout reflects
+            // wall-clock order: events.jsonl is sorted, step folders
+            // are renumbered, and each folder's meta.yaml has its
+            // path fields rewritten to point at the new step_dir.
+            EventsFinalizer.sortAndRenumber(in: dir)
+
             // Top-level meta.yaml — session metadata the menu app's
             // recordings list and the agent's structuring pass both
             // read. Replaces the flow.json header from the v1 layout.

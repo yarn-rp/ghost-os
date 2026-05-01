@@ -125,6 +125,82 @@ struct V2EventsLayoutTests {
         #expect(mPos < zPos)
     }
 
+    @Test("EventsFinalizer sorts + renumbers + renames + rewrites meta.yaml")
+    func sortAndRenumber() throws {
+        let dir = try makeTempRecording()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        // Three steps appended in this order:
+        //   0001-click       at t=200
+        //   0002-narration   at t=100   ← out of order
+        //   0003-click       at t=300
+        // After sort: narration first (t=100), then the two clicks.
+        // The two clicks SWAP slots (0001-click ↔ 0002-click), which
+        // exercises the two-phase rename path.
+        try makeStepFolder(dir: dir, name: "0001-click", ts: 200, screenshot: "steps/0001-click/screenshot.jpg")
+        try makeStepFolder(dir: dir, name: "0002-narration", ts: 100, screenshot: nil)
+        try makeStepFolder(dir: dir, name: "0003-click", ts: 300, screenshot: "steps/0003-click/screenshot.jpg")
+
+        // events.jsonl with the same three lines.
+        let lines = [
+            #"{"idx":1,"step_dir":"steps/0001-click","action_type":"click","timestamp_ms":200,"summary":"first click"}"#,
+            #"{"idx":2,"step_dir":"steps/0002-narration","action_type":"narration","timestamp_ms":100,"summary":"narration: hello"}"#,
+            #"{"idx":3,"step_dir":"steps/0003-click","action_type":"click","timestamp_ms":300,"summary":"second click"}"#,
+        ]
+        let eventsPath = "\(dir)/events.jsonl"
+        try lines.joined(separator: "\n").write(toFile: eventsPath, atomically: true, encoding: .utf8)
+
+        EventsFinalizer.sortAndRenumber(in: dir)
+
+        // Folders renamed to time-order.
+        #expect(FileManager.default.fileExists(atPath: "\(dir)/steps/0001-narration"))
+        #expect(FileManager.default.fileExists(atPath: "\(dir)/steps/0002-click"))
+        #expect(FileManager.default.fileExists(atPath: "\(dir)/steps/0003-click"))
+        // The original out-of-order folder names are gone.
+        #expect(!FileManager.default.fileExists(atPath: "\(dir)/steps/0002-narration"))
+
+        // events.jsonl is now sorted by timestamp_ms with renumbered idx
+        // and rewritten step_dir paths.
+        let rewritten = try String(contentsOf: URL(fileURLWithPath: eventsPath), encoding: .utf8)
+        let outLines = rewritten.split(separator: "\n", omittingEmptySubsequences: true)
+        #expect(outLines.count == 3)
+        #expect(outLines[0].contains("\"idx\":1") && outLines[0].contains("\"step_dir\":\"steps/0001-narration\""))
+        #expect(outLines[1].contains("\"idx\":2") && outLines[1].contains("\"step_dir\":\"steps/0002-click\""))
+        #expect(outLines[2].contains("\"idx\":3") && outLines[2].contains("\"step_dir\":\"steps/0003-click\""))
+
+        // meta.yaml in the renamed click folder has its screenshot path
+        // rewritten to point at the new step_dir.
+        let movedClickMeta = try String(
+            contentsOf: URL(fileURLWithPath: "\(dir)/steps/0002-click/meta.yaml"),
+            encoding: .utf8
+        )
+        #expect(movedClickMeta.contains("steps/0002-click/screenshot.jpg"))
+        #expect(!movedClickMeta.contains("steps/0001-click/screenshot.jpg"))
+    }
+
+    @Test("EventsFinalizer is idempotent on already-sorted recordings")
+    func sortAndRenumberIdempotent() throws {
+        let dir = try makeTempRecording()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        try makeStepFolder(dir: dir, name: "0001-click", ts: 100, screenshot: "steps/0001-click/screenshot.jpg")
+        try makeStepFolder(dir: dir, name: "0002-click", ts: 200, screenshot: "steps/0002-click/screenshot.jpg")
+        let lines = [
+            #"{"idx":1,"step_dir":"steps/0001-click","action_type":"click","timestamp_ms":100}"#,
+            #"{"idx":2,"step_dir":"steps/0002-click","action_type":"click","timestamp_ms":200}"#,
+        ].joined(separator: "\n") + "\n"
+        let eventsPath = "\(dir)/events.jsonl"
+        try lines.write(toFile: eventsPath, atomically: true, encoding: .utf8)
+
+        EventsFinalizer.sortAndRenumber(in: dir)
+        let firstPass = try String(contentsOf: URL(fileURLWithPath: eventsPath), encoding: .utf8)
+        EventsFinalizer.sortAndRenumber(in: dir)
+        let secondPass = try String(contentsOf: URL(fileURLWithPath: eventsPath), encoding: .utf8)
+        #expect(firstPass == secondPass)
+        #expect(FileManager.default.fileExists(atPath: "\(dir)/steps/0001-click"))
+        #expect(FileManager.default.fileExists(atPath: "\(dir)/steps/0002-click"))
+    }
+
     @Test("YAMLEmit handles strings, bools, multi-line, and null")
     func yamlBasics() {
         let yaml = YAMLEmit.mapping([
@@ -163,5 +239,32 @@ struct V2EventsLayoutTests {
         let path = "\(shotsDir)/\(name)"
         FileManager.default.createFile(atPath: path, contents: Data(bytes))
         return path
+    }
+
+    /// Materialise a step folder + meta.yaml on disk in the v2 shape.
+    /// Used by the EventsFinalizer tests to seed the layout we're about
+    /// to renumber.
+    private func makeStepFolder(
+        dir: String,
+        name: String,
+        ts: Int64,
+        screenshot: String?
+    ) throws {
+        let folder = "\(dir)/steps/\(name)"
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        var meta = "action_type: \"\(name.split(separator: "-", maxSplits: 1).last ?? "")\"\n"
+        meta += "timestamp_ms: \(ts)\n"
+        if let screenshot {
+            meta += "screenshot: \"\(screenshot)\"\n"
+            // Materialise the screenshot file too so a future test can
+            // assert the file moved with the folder rename.
+            let absShot = (dir as NSString).appendingPathComponent(screenshot)
+            try? FileManager.default.createDirectory(
+                atPath: (absShot as NSString).deletingLastPathComponent,
+                withIntermediateDirectories: true
+            )
+            FileManager.default.createFile(atPath: absShot, contents: Data([0x89, 0x50]))
+        }
+        try meta.write(toFile: "\(folder)/meta.yaml", atomically: true, encoding: .utf8)
     }
 }
