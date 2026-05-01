@@ -174,9 +174,12 @@ public enum LearningDispatch {
     }
 
     /// Lightweight events.jsonl line. Just enough for the timeline to
-    /// render a row + the agent's Pass 1 to detect phases. Anything richer
-    /// belongs in meta.yaml; consumers walk into the step folder when
-    /// they need detail.
+    /// render a row + the agent's Pass 1 to detect phases. Pass 1 ignores
+    /// `replicate` and `target` — those are here so the menu timeline
+    /// can render copy buttons and per-row detail without loading every
+    /// step's meta.yaml. Anything richer (full element subtree, AX paths,
+    /// etc.) lives in meta.yaml; consumers walk into the step folder
+    /// when they need it.
     public nonisolated static func serializeIndexEntry(
         _ action: ObservedAction,
         stepIndex: Int,
@@ -196,7 +199,31 @@ public enum LearningDispatch {
         if let url = action.url, !url.isEmpty {
             dict["url"] = url
         }
+        if let built = ReplicateCommand.native(action) {
+            dict["replicate"] = built.shellString
+        }
+        if let target = inlineTarget(action) {
+            dict["target"] = target
+        }
         return dict
+    }
+
+    /// One-line "what does this event point at" string for the timeline
+    /// row's secondary line. Browser events: the URL. Native clicks /
+    /// types: the element's locator or computed_name + role. Nil when
+    /// nothing useful is available.
+    private nonisolated static func inlineTarget(_ action: ObservedAction) -> String? {
+        if let name = action.elementContext?.computedName, !name.isEmpty {
+            let role = action.elementContext?.role ?? ""
+            return role.isEmpty ? "'\(name)'" : "'\(name)' (\(role))"
+        }
+        if let title = action.elementContext?.title, !title.isEmpty {
+            return "'\(title)'"
+        }
+        if let url = action.url, !url.isEmpty {
+            return url
+        }
+        return nil
     }
 
     private nonisolated static func truncate(_ s: String, max: Int) -> String {

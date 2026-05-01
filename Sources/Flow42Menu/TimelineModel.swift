@@ -1,10 +1,15 @@
-// TimelineModel.swift - Tail the active recording's flow.json.
+// TimelineModel.swift - Tail the active recording's events.jsonl.
 //
-// flow.json is the single source of truth: the recorder daemon rewrites it
-// atomically on every captured action. We watch the file via FSEvents,
-// re-parse the actions array on every change, and replace our @Published
-// list. SwiftUI handles the diff cheaply because TimelineEvent is
-// Identifiable and the LazyVStack only materializes visible rows.
+// v2 layout: events.jsonl is the authoritative live stream — one
+// append-only line per step. Coalesced edits (typeText keeps
+// growing, backspace shrinks) emit a fresh line; the menu timeline
+// dedupes on `step_dir` so the most recent line wins. The full
+// per-step detail lives in `<step_dir>/meta.yaml` but we don't load
+// it here: events.jsonl carries enough for the row UX (summary,
+// target, replicate, screenshot path).
+//
+// File watching is FSEvents on the parent directory because the
+// recorder may create the file lazily on its first append.
 
 import Combine
 import Dispatch
@@ -86,7 +91,7 @@ final class TimelineModel: ObservableObject {
             return
         }
 
-        let path = (dir as NSString).appendingPathComponent("flow.json")
+        let path = (dir as NSString).appendingPathComponent("events.jsonl")
         sourcePath = path
         recordingDir = dir
         events = []
@@ -96,9 +101,9 @@ final class TimelineModel: ObservableObject {
         // several actions before the popover opened.
         reload()
 
-        // Watch the parent dir so we re-arm when flow.json is created (the
-        // daemon rewrites it via tmp+rename, which means the file object's
-        // identity changes).
+        // Watch the parent dir so we re-arm when events.jsonl is created
+        // (the recorder creates the file lazily on its first append, and
+        // an FD-on-the-file watch wouldn't fire for that initial create).
         let dirFD = open(dir, O_EVTONLY)
         if dirFD >= 0 {
             self.dirFD = dirFD
@@ -126,27 +131,61 @@ final class TimelineModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(33), execute: work)
     }
 
-    /// Re-parse flow.json from scratch and replace `events`. Cheap because
-    /// the file is small (kilobytes per recording) and SwiftUI only diffs
-    /// what's needed.
+    /// Re-parse events.jsonl from scratch and replace `events`. We dedup
+    /// on `step_dir` (last write wins) so coalesce + backspace edits — which
+    /// append fresh lines for the same step — don't show as duplicates.
+    /// Cheap because:
+    ///   - events.jsonl is ~hundreds of bytes per line, capped at our 500-
+    ///     event render window so we only parse the tail.
+    ///   - SwiftUI's List virtualization means rebuilding the array doesn't
+    ///     re-measure offscreen rows.
     private func reload() {
         guard let path = sourcePath,
               let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let actions = parsed["actions"] as? [[String: Any]]
+              let text = String(data: data, encoding: .utf8)
         else { return }
 
-        // Only build the tail we'll actually render. Saves allocations and
-        // (more importantly) keeps SwiftUI's identifier diff bounded when a
-        // long recording grows past the cap.
-        let total = actions.count
+        // Walk all lines first, dedup on step_dir keeping the LAST entry
+        // (the recorder appends a new line on every coalesce / backspace
+        // update). Then keep only the most recent N for the render window.
+        var byDir: [String: [String: Any]] = [:]
+        var order: [String] = []   // first-seen order; last-write keeps key
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard
+                let lineData = raw.data(using: .utf8),
+                let dict = (try? JSONSerialization.jsonObject(with: lineData))
+                    as? [String: Any],
+                let stepDir = dict["step_dir"] as? String
+            else { continue }
+            if byDir[stepDir] == nil { order.append(stepDir) }
+            byDir[stepDir] = dict
+        }
+
+        // Sort by timestamp_ms when we have it (extension events from the
+        // native host can land out-of-order with native CGEvent-tap ones
+        // because they're in different processes).
+        let merged: [[String: Any]] = order.compactMap { byDir[$0] }
+            .sorted { a, b in
+                let ax = (a["timestamp_ms"] as? Int64)
+                    ?? (a["timestamp_ms"] as? Int).map(Int64.init)
+                    ?? Int64.max
+                let bx = (b["timestamp_ms"] as? Int64)
+                    ?? (b["timestamp_ms"] as? Int).map(Int64.init)
+                    ?? Int64.max
+                return ax < bx
+            }
+
+        let total = merged.count
         let startIndex = max(0, total - Self.maxRenderedEvents)
         var built: [TimelineEvent] = []
         built.reserveCapacity(total - startIndex)
         for index in startIndex..<total {
-            built.append(TimelineEvent.from(dict: actions[index], recordingDir: recordingDir, index: index))
+            built.append(TimelineEvent.from(
+                indexEntry: merged[index],
+                recordingDir: recordingDir,
+                fallbackIndex: index
+            ))
         }
-        // Only publish if we actually saw a change.
         if built.count != events.count
             || built.last?.id != events.last?.id
             || built.first?.id != events.first?.id
@@ -157,185 +196,50 @@ final class TimelineModel: ObservableObject {
 }
 
 extension TimelineEvent {
-    /// Build a TimelineEvent from one entry in flow.json's actions array.
-    /// `index` makes the id stable across re-parses even when two events
-    /// share a timestamp_ms.
-    static func from(dict: [String: Any], recordingDir: String?, index: Int) -> TimelineEvent {
-        let rawActionType = (dict["action_type"] as? String) ?? "unknown"
-        let timestampMs = dict["timestamp_ms"] as? Int64
-            ?? (dict["timestamp_ms"] as? Int).map(Int64.init)
+    /// Build a TimelineEvent from one events.jsonl line. The recorder
+    /// pre-computed `summary`, `target`, and `replicate` for the timeline
+    /// row's UX, so this is just a typed-projection — no per-action_type
+    /// branching. `fallbackIndex` keeps SwiftUI ids stable when two lines
+    /// happen to share a timestamp_ms.
+    ///
+    /// Screenshot path is computed from `step_dir`: annotated.jpg if it
+    /// exists (clicks, highlights, drags), screenshot.jpg otherwise. The
+    /// EventThumbnail view checks file existence before drawing.
+    static func from(
+        indexEntry: [String: Any],
+        recordingDir: String?,
+        fallbackIndex: Int
+    ) -> TimelineEvent {
+        let actionType = (indexEntry["action_type"] as? String) ?? "unknown"
+        let stepDir = (indexEntry["step_dir"] as? String) ?? ""
+        let timestampMs = indexEntry["timestamp_ms"] as? Int64
+            ?? (indexEntry["timestamp_ms"] as? Int).map(Int64.init)
 
-        // The extension folds all browser navigation events into one
-        // `appSwitch` with a `nav_kind` field. From a viewer's perspective
-        // those are different things — render them with their nav_kind
-        // badges + summaries instead of generic APP.
-        let actionType: String = {
-            if rawActionType == "appSwitch", let navKind = dict["nav_kind"] as? String {
-                switch navKind {
-                case "goto":      return "urlChange"
-                case "newTab":    return "newTab"
-                case "tabSwitch": return "tabSwitch"
-                default:          return rawActionType
-                }
-            }
-            return rawActionType
+        let summary = (indexEntry["summary"] as? String) ?? actionType
+        let target = indexEntry["target"] as? String
+        let replicate = indexEntry["replicate"] as? String
+
+        let screenshotPath: String? = {
+            guard !stepDir.isEmpty, let recordingDir else { return nil }
+            let absStep = (recordingDir as NSString).appendingPathComponent(stepDir)
+            // Prefer annotated.jpg (with click marker / drag rect), fall
+            // back to the raw screenshot for keystrokes / hotkeys.
+            let annotated = (absStep as NSString).appendingPathComponent("annotated.jpg")
+            if FileManager.default.fileExists(atPath: annotated) { return annotated }
+            // Highlight steps store their image as region.png.
+            let region = (absStep as NSString).appendingPathComponent("region.png")
+            if FileManager.default.fileExists(atPath: region) { return region }
+            let raw = (absStep as NSString).appendingPathComponent("screenshot.jpg")
+            if FileManager.default.fileExists(atPath: raw) { return raw }
+            return nil
         }()
 
-        var summary = actionType
-        var target: String?
-
-        switch actionType {
-        case "click":
-            let count = (dict["count"] as? Int) ?? 1
-            let button = (dict["button"] as? String) ?? "left"
-            let element = dict["element"] as? [String: Any]
-            let verb = count >= 2 ? "double-click" : "\(button) click"
-
-            // Prefer info-rich identifiers in this order:
-            //   1. Playwright locator (extension)        — "getByRole('button', { name: 'Save' })"
-            //   2. computed_name + role (native AX)       — "'Save' button"
-            //   3. title + role                           — "'Save' button"
-            //   4. dom_id                                 — "#submit-btn"
-            //   5. coordinates                            — "(720, 144)"
-            if let locator = nonEmpty(element?["locator"] as? String) {
-                summary = "\(verb) \(locator)"
-            } else if let name = nonEmpty(element?["computed_name"] as? String)
-                ?? nonEmpty(element?["title"] as? String) {
-                let role = simplifyRole(element?["role"] as? String)
-                summary = role.isEmpty
-                    ? "\(verb) '\(truncate(name, max: 50))'"
-                    : "\(verb) '\(truncate(name, max: 40))' \(role)"
-            } else if let domId = nonEmpty(element?["dom_id"] as? String) {
-                summary = "\(verb) #\(domId)"
-            } else {
-                let x = dict["x"] as? Double ?? 0
-                let y = dict["y"] as? Double ?? 0
-                summary = "\(verb) @ (\(Int(x)), \(Int(y)))"
-            }
-
-            // Target line: URL for browser clicks, app name otherwise.
-            if let url = nonEmpty(dict["url"] as? String) {
-                target = truncate(url, max: 70)
-            } else if let app = nonEmpty(dict["app"] as? String) {
-                target = app
-            }
-        case "typeText":
-            let text = (dict["text"] as? String) ?? ""
-            summary = "type \"\(truncate(text, max: 40))\""
-            // Surface which field was typed into when we have it.
-            let element = dict["element"] as? [String: Any]
-            if let locator = nonEmpty(element?["locator"] as? String) {
-                target = locator
-            } else if let name = nonEmpty(element?["computed_name"] as? String)
-                ?? nonEmpty(element?["title"] as? String) {
-                let role = simplifyRole(element?["role"] as? String)
-                target = role.isEmpty ? "into '\(name)'" : "into '\(name)' \(role)"
-            } else if let url = nonEmpty(dict["url"] as? String) {
-                target = truncate(url, max: 70)
-            }
-        case "keyPress":
-            let name = dict["key_name"] as? String ?? "?"
-            let mods = (dict["modifiers"] as? [String])?.joined(separator: "+") ?? ""
-            summary = mods.isEmpty ? "press \(name)" : "press \(mods)+\(name)"
-            // For extension keypresses, surface the field that received it
-            // (Enter pressed in a search box reads better than just "press Enter").
-            let element = dict["element"] as? [String: Any]
-            if let locator = nonEmpty(element?["locator"] as? String) {
-                target = locator
-            } else if let n = nonEmpty(element?["computed_name"] as? String)
-                ?? nonEmpty(element?["title"] as? String) {
-                target = "in '\(n)'"
-            } else if let url = nonEmpty(dict["url"] as? String) {
-                target = truncate(url, max: 70)
-            }
-        case "hotkey":
-            let name = dict["key_name"] as? String ?? "?"
-            let mods = (dict["modifiers"] as? [String])?.joined(separator: "+") ?? ""
-            summary = "hotkey \(mods)+\(name)"
-        case "appSwitch":
-            // Pure app switch (Cmd+Tab to a different app) — extension nav
-            // events are remapped above to urlChange / newTab / tabSwitch.
-            let toApp = dict["to_app"] as? String ?? "?"
-            summary = "switch to \(toApp)"
-            target = toApp
-        case "scroll":
-            let dx = dict["delta_x"] as? Int ?? 0
-            let dy = dict["delta_y"] as? Int ?? 0
-            summary = "scroll dx=\(dx) dy=\(dy)"
-        case "narration":
-            let text = (dict["text"] as? String) ?? ""
-            summary = "🎙  \(truncate(text, max: 80))"
-        case "highlight":
-            let w = Int((dict["width"] as? Double) ?? 0)
-            let h = Int((dict["height"] as? Double) ?? 0)
-            let app = dict["app"] as? String ?? ""
-            // Browser highlights from the extension carry a Playwright
-            // locator; surface that in the headline. Native macOS
-            // highlights use the rect dimensions.
-            let element = dict["element"] as? [String: Any]
-            if let locator = nonEmpty(element?["locator"] as? String) {
-                summary = "highlight \(locator)"
-            } else {
-                summary = "highlight \(w)×\(h)" + (app.isEmpty ? "" : " in \(app)")
-            }
-            // Target line = the most-readable text we have for this region.
-            // Both paths now populate one of these fields:
-            //   text_content  — extension: innerText  / native: AX text join
-            //   ocr_text      — native: full OCR transcript
-            // Prefer the structural one; fall back to OCR; last resort the
-            // count of AX elements.
-            let textContent = nonEmpty(dict["text_content"] as? String)
-                ?? nonEmpty(dict["ocr_text"] as? String)
-            if let textContent {
-                target = truncate(
-                    textContent.replacingOccurrences(of: "\n", with: " · "),
-                    max: 100
-                )
-            } else if let n = dict["ax_element_count"] as? Int {
-                target = "\(n) AX element\(n == 1 ? "" : "s")"
-            }
-        case "urlChange":
-            // Extension uses `to_url`, native uses `url`.
-            let url = nonEmpty(dict["to_url"] as? String)
-                ?? nonEmpty(dict["url"] as? String) ?? ""
-            summary = "navigate → \(truncate(url, max: 70))"
-            target = nonEmpty(dict["window"] as? String)
-        case "newTab":
-            let url = nonEmpty(dict["to_url"] as? String)
-                ?? nonEmpty(dict["url"] as? String) ?? ""
-            summary = "new tab → \(truncate(url, max: 70))"
-            if let tabIdx = dict["tab_index"] as? Int {
-                target = "tab #\(tabIdx)"
-            }
-        case "tabSwitch":
-            let url = nonEmpty(dict["to_url"] as? String)
-                ?? nonEmpty(dict["url"] as? String) ?? ""
-            let title = nonEmpty(dict["title"] as? String)
-                ?? nonEmpty(dict["window"] as? String) ?? ""
-            summary = "switch tab → \(truncate(title.isEmpty ? url : title, max: 70))"
-            target = title.isEmpty ? nil : truncate(url, max: 70)
-        default:
-            break
-        }
-
-        // Resolve a screenshot path. Native events emit relative paths
-        // ("screenshots/step-001.annotated.jpg"); highlights emit absolute.
-        var screenshotPath: String? = nil
-        let candidates = [
-            dict["annotated_screenshot"] as? String,
-            dict["screenshot"] as? String,
-        ]
-        for raw in candidates {
-            guard let raw, !raw.isEmpty else { continue }
-            if raw.hasPrefix("/") {
-                screenshotPath = raw
-            } else if let recordingDir {
-                screenshotPath = (recordingDir as NSString).appendingPathComponent(raw)
-            }
-            if screenshotPath != nil { break }
-        }
-
-        let id = "\(timestampMs ?? 0)-\(actionType)-\(index)"
+        // Stable id even when two events share a millisecond. step_dir
+        // is unique within a session; tag with fallbackIndex so the
+        // SwiftUI diff stays stable across reloads.
+        let id = stepDir.isEmpty
+            ? "\(timestampMs ?? 0)-\(actionType)-\(fallbackIndex)"
+            : stepDir
 
         return TimelineEvent(
             id: id,
@@ -343,51 +247,9 @@ extension TimelineEvent {
             summary: summary,
             target: target,
             timestampMs: timestampMs,
-            replicate: dict["replicate"] as? String,
+            replicate: replicate,
             screenshotPath: screenshotPath,
-            raw: dict
+            raw: indexEntry
         )
-    }
-
-    private static func truncate(_ s: String, max: Int) -> String {
-        if s.count <= max { return s }
-        return String(s.prefix(max)) + "…"
-    }
-
-    private static func nonEmpty(_ s: String?) -> String? {
-        guard let s, !s.isEmpty else { return nil }
-        return s
-    }
-
-    /// Convert AX role names to short human labels for inline use.
-    /// "AXButton" → "button", "AXTextField" → "text field", etc.
-    /// Returns "" for roles that don't add useful information ("AXGroup",
-    /// "AXGenericElement", "browser") so the caller can omit the role
-    /// suffix entirely.
-    private static func simplifyRole(_ role: String?) -> String {
-        guard let role, !role.isEmpty else { return "" }
-        switch role {
-        case "AXButton": return "button"
-        case "AXLink": return "link"
-        case "AXTextField", "AXTextArea": return "text field"
-        case "AXCheckBox": return "checkbox"
-        case "AXRadioButton": return "radio"
-        case "AXMenuItem": return "menu item"
-        case "AXMenuButton": return "menu"
-        case "AXImage": return "image"
-        case "AXStaticText", "AXHeading": return "text"
-        case "AXComboBox": return "combobox"
-        case "AXPopUpButton": return "dropdown"
-        case "AXTab": return "tab"
-        case "AXTable", "AXOutline": return "table"
-        case "AXSlider": return "slider"
-        case "AXToolbar": return "toolbar"
-        case "AXGroup", "AXGenericElement", "browser", "AXScrollArea":
-            return ""    // not informative — caller should skip the suffix
-        default:
-            // Unknown — strip AX prefix if present, lowercase first letter.
-            let stripped = role.hasPrefix("AX") ? String(role.dropFirst(2)) : role
-            return stripped.lowercased()
-        }
     }
 }
