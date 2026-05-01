@@ -1,6 +1,6 @@
 // SuppressionMarker.swift - Cross-process flag that pauses event capture.
 //
-// File presence at ~/.openclaw/flow42/.suppress-events tells the recorder
+// File presence at ~/.flow42/.suppress-events tells the recorder
 // daemon to drop every native event. Used right now by the Flow42 menu app's
 // annotation overlay: while the user is dragging a rectangle, the Cmd+Shift+A
 // keystroke and the mouse-down/up that define the rect would otherwise be
@@ -18,12 +18,7 @@ public enum SuppressionMarker {
     /// Resolved path — computed nonisolated so the recorder thread can read
     /// it without an actor hop on every event.
     public nonisolated static func path() -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
-            .appendingPathComponent(".suppress-events")
-            .path
+        Flow42Paths.suppressEventsFile()
     }
 
     /// Cheap presence check. FileManager.fileExists is a stat under the hood

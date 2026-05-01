@@ -4,11 +4,12 @@
 // each invocation is a brand-new process and each registers its own NSStatusItem,
 // hence the "multiple bars" effect.
 //
-// Strategy: write our pid to ~/.openclaw/flow42/menu.pid at launch. On startup
+// Strategy: write our pid to ~/.flow42/menu.pid at launch. On startup
 // check whether that file exists, parse the pid, and `kill -0` it. If the
 // existing process is alive, log + exit. Stale pid files are overwritten.
 
 import AppKit
+import Flow42Core
 import Foundation
 
 @MainActor
@@ -60,10 +61,5 @@ enum SingleInstance {
 
 /// Reachable from `atexit` (which can't capture `Self.`).
 private func pidPathStatic() -> String {
-    let home = FileManager.default.homeDirectoryForCurrentUser
-    return home
-        .appendingPathComponent(".openclaw")
-        .appendingPathComponent("flow42")
-        .appendingPathComponent("menu.pid")
-        .path
+    Flow42Paths.menuPidFile()
 }

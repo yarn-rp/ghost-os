@@ -64,10 +64,7 @@ enum InstallSkills {
     }
 
     private static func writeManifest(installed: [[String: Any]]) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
+        let dir = URL(fileURLWithPath: Flow42Paths.root())
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let manifestURL = dir.appendingPathComponent("installed-skills.json")
         let body: [String: Any] = [

@@ -3,7 +3,7 @@
 // LSUIElement bundle (no Dock icon, no main menu). Boots the four long-lived
 // objects:
 //
-//   StateClient          watches ~/.openclaw/flow42/state.json
+//   StateClient          watches ~/.flow42/state.json
 //   EdgeGlowController   per-screen overlay windows for the magenta/orange glow
 //   MenuController       status item + popover
 //

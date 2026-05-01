@@ -1,7 +1,7 @@
 // Annotations.swift - `flow42 annotations list/show/clear` CLI subcommand.
 //
 // Annotations are produced by the Flow42 menu app's "Circle to Search" overlay
-// (Cmd+Shift+A). Each one is a directory under ~/.openclaw/flow42/annotations/
+// (Cmd+Shift+A). Each one is a directory under ~/.flow42/annotations/
 // containing meta.json + region.png + ax.json. This subcommand exposes them
 // so an agent can read context the user pinned visually.
 //

@@ -15,7 +15,7 @@
 //      open click-through overlay window on the screen the cursor is on.
 //   2. mouseDown sets the start; drag updates the end; mouseUp commits.
 //   3. commit(): tear down monitors + overlay, then async-capture pixels +
-//      AX subtree and write to ~/.openclaw/flow42/annotations/<id>/.
+//      AX subtree and write to ~/.flow42/annotations/<id>/.
 //   4. Esc anywhere cancels.
 
 import AppKit
@@ -464,7 +464,7 @@ final class AnnotationController: ObservableObject {
         frontApp: NSRunningApplication?
     ) async {
         // Highlights live alongside the recording's other event artifacts
-        // — no more standalone ~/.openclaw/flow42/annotations/<id>/ folder.
+        // — no more standalone ~/.flow42/annotations/<id>/ folder.
         // We need the active recording's directory; arm() already verified
         // one is in progress.
         guard let active = ActiveRecording.read(),

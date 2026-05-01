@@ -5,7 +5,7 @@
 //   flow42 setup     Interactive setup wizard
 //   flow42 doctor    Diagnose issues and suggest fixes
 //   flow42 status    Quick health check
-//   flow42 record    Record a user-driven flow to ~/.openclaw/flow42/recipes/
+//   flow42 record    Record a user-driven flow to ~/.flow42/flows/
 //   flow42 version   Print version
 
 import AppKit
@@ -150,8 +150,8 @@ func printUsage() {
       setup          Interactive setup wizard (first-time configuration)
       doctor         Diagnose issues and suggest fixes
       status         Quick health check
-      record         Record a flow to ~/.openclaw/flow42/recipes/
-      flows          List recordings in ~/.openclaw/flow42/recipes/
+      record         Record a flow to ~/.flow42/flows/
+      flows          List recordings in ~/.flow42/flows/
       act            Execute one action (click, type, press, hotkey, scroll,
                      hover, long-press, drag, window, focus, app-switch, navigate)
       snapshot       Capture an image of the current screen / page

@@ -1,6 +1,6 @@
 // RecipeStore.swift - File-based recipe storage
 //
-// Loads/saves/lists/deletes recipes from ~/.openclaw/flow42/recipes/
+// Loads/saves/lists/deletes recipes from ~/.flow42/recipes/
 // Logs decode errors so broken recipes are visible, not silently skipped.
 
 import Foundation
@@ -8,7 +8,7 @@ import Foundation
 /// File-based recipe storage.
 public enum RecipeStore {
 
-    private static let recipesDir = NSString(string: "~/.openclaw/flow42/recipes").expandingTildeInPath
+    private static let recipesDir = (Flow42Paths.root() as NSString).appendingPathComponent("recipes")
 
     /// List all available recipes. Logs decode errors for broken recipe files.
     public static func listRecipes() -> [Recipe] {

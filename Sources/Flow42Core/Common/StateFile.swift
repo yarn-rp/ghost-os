@@ -1,4 +1,4 @@
-// StateFile.swift - Shared `~/.openclaw/flow42/state.json` reader/writer.
+// StateFile.swift - Shared `~/.flow42/state.json` reader/writer.
 //
 // This file is the single source of truth for the menu bar app's "what is
 // flow42 doing right now?" view. The CLI writes; the menu app reads.
@@ -87,12 +87,7 @@ public enum StateFile {
     /// Path to the state file. Public so the menu app can watch it via
     /// FSEvents.
     public static func path() -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
-            .appendingPathComponent("state.json")
-            .path
+        Flow42Paths.stateFile()
     }
 
     /// Read the current state. Returns idle when the file is missing or

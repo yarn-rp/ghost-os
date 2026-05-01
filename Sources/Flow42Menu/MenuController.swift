@@ -103,7 +103,7 @@ final class MenuController {
     }
 
     /// Submenu: "Browser mode → Auto / Native / Extension". Picks persist
-    /// to ~/.openclaw/flow42/browser-mode and apply to every subsequent
+    /// to ~/.flow42/browser-mode and apply to every subsequent
     /// recording. The current pick gets a checkmark.
     private func buildBrowserModeItem() -> NSMenuItem {
         let parent = NSMenuItem(title: "Browser mode", action: nil, keyEquivalent: "")
@@ -208,11 +208,7 @@ final class MenuController {
     }
 
     @objc private func openRecordings() {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let url = home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
-            .appendingPathComponent("recipes")
+        let url = URL(fileURLWithPath: Flow42Paths.flowsRoot())
         NSWorkspace.shared.open(url)
     }
 

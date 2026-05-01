@@ -1,6 +1,6 @@
 // Mode.swift - `flow42 mode get/set` CLI subcommand.
 //
-// Atomically reads/writes ~/.openclaw/flow42/state.json. The Flow42 menu bar
+// Atomically reads/writes ~/.flow42/state.json. The Flow42 menu bar
 // app watches this file via FSEvents and updates the screen-edge glow + status
 // icon based on the current mode.
 //
@@ -42,7 +42,7 @@ enum Mode {
     /// `flow42 mode browser get | set <auto|native|extension>` — controls
     /// whether the recorder defers in-page Chrome events to the extension
     /// or captures everything natively. Persists to
-    /// ~/.openclaw/flow42/browser-mode and is read by every subsequent
+    /// ~/.flow42/browser-mode and is read by every subsequent
     /// `flow42 record start`.
     private static func runBrowser(args: [String]) {
         guard let sub = args.first else {
@@ -137,7 +137,7 @@ enum Mode {
           flow42 mode browser get
           flow42 mode browser set <auto|native|extension>
 
-        The Flow42 menu bar app watches ~/.openclaw/flow42/state.json and
+        The Flow42 menu bar app watches ~/.flow42/state.json and
         renders the screen-edge glow accordingly:
           recording  → magenta
           autonomous → orange

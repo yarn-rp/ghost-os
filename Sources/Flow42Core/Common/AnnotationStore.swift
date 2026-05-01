@@ -3,7 +3,7 @@
 // Every annotation produced by the Flow42 menu app's "Circle to Search"
 // overlay lands at:
 //
-//   ~/.openclaw/flow42/annotations/<ISO-timestamp>/
+//   ~/.flow42/annotations/<ISO-timestamp>/  (legacy v1 layout)
 //     meta.json    — rect (display + global coords), display ID, app, window,
 //                    note text, optional lasso path, timestamp
 //     region.png   — screenshot of the bounding rect
@@ -84,12 +84,7 @@ public struct AnnotationMeta: Sendable, Codable {
 public enum AnnotationStore {
 
     public static func rootDir() -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
-            .appendingPathComponent("annotations")
-            .path
+        Flow42Paths.legacyAnnotationsDir()
     }
 
     /// List annotation directory names, newest-first. Returns an empty array

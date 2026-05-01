@@ -17,8 +17,8 @@
 // processes — they can't write "done\n" to stdin of a backgrounded child. With
 // start/stop, the agent calls one command, does work, then calls another.
 //
-// Recording dir layout (unchanged):
-//   ~/.openclaw/flow42/recipes/<slug>/
+// Recording dir layout (v2):
+//   ~/.flow42/flows/<slug>/
 //     flow.json           — task metadata + serialized actions
 //     screenshots/        — populated by LearningScreenshot per click
 //     narration.wav       — audio captured during the recording
@@ -99,7 +99,7 @@ enum Record {
         // Browser-mode flag: --browser-mode native | extension | auto.
         // Propagated to the daemon via an env var so EventHandlers reads it
         // at session start. CLI flag overrides $FLOW42_BROWSER_MODE; both
-        // override the on-disk config at ~/.openclaw/flow42/browser-mode.
+        // override the on-disk config at ~/.flow42/browser-mode.
         let cliBrowserMode = parseFlag(args, "--browser-mode", "-b")
 
         let logPath = (dir as NSString).appendingPathComponent("recorder.log")
@@ -469,11 +469,7 @@ enum Record {
     }
 
     private static func recipesRoot() -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
-            .appendingPathComponent("recipes")
+        URL(fileURLWithPath: Flow42Paths.flowsRoot())
     }
 
     /// Resolve the absolute path of the running flow42 binary (so we can

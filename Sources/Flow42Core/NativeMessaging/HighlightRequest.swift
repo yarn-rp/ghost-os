@@ -10,7 +10,7 @@
 // separate processes. The host is invoked once per extension connection,
 // not per request. We bridge via a marker file:
 //
-//   1. Menu app writes ~/.openclaw/flow42/highlight-pending
+//   1. Menu app writes ~/.flow42/highlight-pending
 //   2. Host, on the extension's next `active-recording` poll, checks for
 //      the marker; if present it signals `highlight_request: true` in the
 //      reply and removes the marker (one-shot semantics).
@@ -26,12 +26,7 @@ import Foundation
 public enum HighlightRequest {
 
     public nonisolated static func path() -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
-            .appendingPathComponent("highlight-pending")
-            .path
+        Flow42Paths.highlightPendingFile()
     }
 
     public nonisolated static func exists() -> Bool {
@@ -51,12 +46,7 @@ public enum HighlightRequest {
 public enum HighlightExit {
 
     public nonisolated static func path() -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
-            .appendingPathComponent("highlight-exit")
-            .path
+        Flow42Paths.highlightExitFile()
     }
 
     public nonisolated static func arm() {

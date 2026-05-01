@@ -149,6 +149,6 @@ public enum GhostConstants {
     public static let defaultTimeoutSeconds: TimeInterval = 30
     public static let defaultPollInterval: TimeInterval = 0.5
     public static let maxSearchDepth = 100
-    public static let recipesDirectory = "~/.openclaw/flow42/recipes"
-    public static let logsDirectory = "~/.openclaw/flow42/logs"
+    public static let recipesDirectory = "~/.flow42/recipes"
+    public static let logsDirectory = "~/.flow42/logs"
 }

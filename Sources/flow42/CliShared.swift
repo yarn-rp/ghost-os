@@ -197,6 +197,6 @@ enum BrowserDriver {
             }
             dir = dir.deletingLastPathComponent()
         }
-        return "/opt/openclaw/flow42/runtime/browser-driver/run.mjs"
+        return "/opt/flow42/runtime/browser-driver/run.mjs"
     }
 }

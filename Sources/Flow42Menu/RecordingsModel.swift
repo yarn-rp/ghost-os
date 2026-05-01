@@ -1,5 +1,5 @@
 // RecordingsModel.swift - Enumerate past recordings under
-// ~/.openclaw/flow42/recipes/ and surface them in the popover.
+// ~/.flow42/flows/ and surface them in the popover.
 
 import AppKit
 import Combine
@@ -92,11 +92,6 @@ final class RecordingsModel: ObservableObject {
     }
 
     private func recipesRoot() -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
-            .appendingPathComponent("recipes")
-            .path
+        Flow42Paths.flowsRoot()
     }
 }

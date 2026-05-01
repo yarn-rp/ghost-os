@@ -170,9 +170,9 @@ struct Doctor {
     // MARK: - Recipes
 
     private mutating func checkRecipes() {
-        let recipesDir = NSHomeDirectory() + "/.flow42/recipes"
+        let recipesDir = (Flow42Paths.root() as NSString).appendingPathComponent("recipes")
         if !FileManager.default.fileExists(atPath: recipesDir) {
-            print("  [FAIL] Recipes: directory missing (~/.openclaw/flow42/recipes/)")
+            print("  [FAIL] Recipes: directory missing (~/.flow42/recipes/)")
             print("    Fix: flow42 setup (installs bundled recipes)")
             issueCount += 1
             return
@@ -251,12 +251,8 @@ struct Doctor {
     }
 
     private mutating func checkWhisperModel() {
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
-            .appendingPathComponent("models")
+        let path = (Flow42Paths.modelsDir() as NSString)
             .appendingPathComponent("ggml-base.en.bin")
-            .path
         if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
            let size = attrs[.size] as? Int, size > 100_000_000 {
             print("  [ok] Whisper model: \(formatBytes(size)) at \(path)")
@@ -483,7 +479,7 @@ struct Doctor {
             if FileManager.default.isExecutableFile(atPath: venvPython) {
                 let result = runShell("\(venvPython) -c 'import mlx_vlm; print(\"ok\")' 2>/dev/null")
                 if result.exitCode == 0 && result.output.contains("ok") {
-                    print("  [ok] Vision Python: ~/.openclaw/flow42/venv/ (mlx_vlm available)")
+                    print("  [ok] Vision Python: ~/.flow42/venv/ (mlx_vlm available)")
                     found = true
                 }
             }
@@ -523,7 +519,7 @@ struct Doctor {
             if major < 3 || (major == 3 && minor < 10) {
                 print("  [!] Python version: \(version) (below minimum 3.10)")
                 print("    MLX requires Python 3.10+.")
-                print("    Fix: brew install python@3.12 && rm -rf ~/.openclaw/flow42/venv && flow42 setup")
+                print("    Fix: brew install python@3.12 && rm -rf ~/.flow42/venv && flow42 setup")
                 warningCount += 1
             } else {
                 print("  [ok] Python version: \(version)")
@@ -546,7 +542,7 @@ struct Doctor {
                let tMinor = Int(tParts[1]) {
                 if tMajor > 4 || (tMajor == 4 && tMinor >= 49) {
                     print("  [FAIL] transformers: \(tVer) (>=4.49 requires PyTorch for Qwen2VL)")
-                    print("    Fix: rm -rf ~/.openclaw/flow42/venv && flow42 setup")
+                    print("    Fix: rm -rf ~/.flow42/venv && flow42 setup")
                     issueCount += 1
                 } else {
                     print("  [ok] transformers: \(tVer)")
@@ -622,7 +618,7 @@ struct Doctor {
                 print("  [!] ShowUI-2B model: not found")
                 print("    Checked:")
                 print("      /opt/homebrew/share/flow42/models/ShowUI-2B/")
-                print("      ~/.openclaw/flow42/models/ShowUI-2B/")
+                print("      ~/.flow42/models/ShowUI-2B/")
                 print("      ~/.shadow/models/llm/ShowUI-2B-bf16-8bit/")
                 print("    Fix: flow42 setup (downloads the model)")
                 warningCount += 1

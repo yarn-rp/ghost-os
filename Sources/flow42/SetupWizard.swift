@@ -407,9 +407,9 @@ struct SetupWizard {
                 printFail("Python venv setup failed")
                 print("  Vision grounding (flow42_ground) will not be available.")
                 print("  You can set it up manually later:")
-                print("    python3 -m venv ~/.openclaw/flow42/venv")
-                print("    ~/.openclaw/flow42/venv/bin/pip install --no-deps \"mlx-vlm==0.1.15\"")
-                print("    ~/.openclaw/flow42/venv/bin/pip install \"transformers==4.48.3\" \"mlx-lm>=0.21.5,<0.30.0\" mlx Pillow \"numpy>=1.23.4\"")
+                print("    python3 -m venv ~/.flow42/venv")
+                print("    ~/.flow42/venv/bin/pip install --no-deps \"mlx-vlm==0.1.15\"")
+                print("    ~/.flow42/venv/bin/pip install \"transformers==4.48.3\" \"mlx-lm>=0.21.5,<0.30.0\" mlx Pillow \"numpy>=1.23.4\"")
                 print("")
                 return false
             }
@@ -442,7 +442,7 @@ struct SetupWizard {
                 printFail("Model download failed")
                 print("  You can download manually:")
                 print("    pip3 install huggingface-hub")
-                print("    huggingface-cli download mlx-community/ShowUI-2B-bf16-8bit --local-dir ~/.openclaw/flow42/models/ShowUI-2B")
+                print("    huggingface-cli download mlx-community/ShowUI-2B-bf16-8bit --local-dir ~/.flow42/models/ShowUI-2B")
                 print("")
                 return false
             }
@@ -473,7 +473,7 @@ struct SetupWizard {
         return result.exitCode == 0
     }
 
-    /// Set up a Python virtual environment at ~/.openclaw/flow42/venv/
+    /// Set up a Python virtual environment at ~/.flow42/venv/
     private func setupPythonVenv() -> Bool {
         let venvPath = NSHomeDirectory() + "/.flow42/venv"
 
@@ -587,7 +587,7 @@ struct SetupWizard {
             if verifyResult.output.contains("BAD_TRANSFORMERS") {
                 let badVer = verifyResult.output.split(separator: ":").last ?? "unknown"
                 print("  ERROR: transformers \(badVer) installed (>=4.49 requires PyTorch).")
-                print("  Fix: rm -rf ~/.openclaw/flow42/venv && flow42 setup")
+                print("  Fix: rm -rf ~/.flow42/venv && flow42 setup")
             } else {
                 print("  ERROR: mlx_vlm verification failed")
             }

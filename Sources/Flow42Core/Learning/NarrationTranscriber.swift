@@ -8,7 +8,7 @@
 // Setup (per-machine, once):
 //   brew install whisper-cpp
 // The first transcription auto-downloads ggml-base.en.bin (~142 MB) into
-// ~/.openclaw/flow42/models/.
+// ~/.flow42/models/.
 
 import Foundation
 
@@ -107,11 +107,7 @@ nonisolated public enum NarrationTranscriber {
     }
 
     private static func ensureModel() throws -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let modelsDir = home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
-            .appendingPathComponent("models")
+        let modelsDir = URL(fileURLWithPath: Flow42Paths.modelsDir())
         try FileManager.default.createDirectory(
             at: modelsDir, withIntermediateDirectories: true
         )

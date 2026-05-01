@@ -14,7 +14,7 @@
 //
 // Resolution order at process start:
 //   1. $FLOW42_BROWSER_MODE                  ("native" | "extension" | "auto")
-//   2. ~/.openclaw/flow42/browser-mode      (same values, one line)
+//   2. ~/.flow42/browser-mode      (same values, one line)
 //   3. .auto                                 (current default — defer to
 //                                              extension when both extension
 //                                              and native messaging are alive)
@@ -65,11 +65,6 @@ public enum BrowserMode: String, Sendable {
     }
 
     private nonisolated static func configFilePath() -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
-            .appendingPathComponent("browser-mode")
-            .path
+        Flow42Paths.browserModeFile()
     }
 }

@@ -1,4 +1,4 @@
-// StateClient.swift - FSEvents watcher on ~/.openclaw/flow42/state.json.
+// StateClient.swift - FSEvents watcher on ~/.flow42/state.json.
 //
 // Publishes the current AppMode as an `AsyncStream`. Survives the file being
 // deleted and recreated (re-arms the watcher on the parent directory once the

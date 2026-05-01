@@ -15,7 +15,7 @@
 //                  → host appends to <recording-dir>/dom-events.jsonl,
 //                    no response needed (fire-and-forget).
 //
-// The recording-active state lives in ~/.openclaw/flow42/active-recording.json
+// The recording-active state lives in ~/.flow42/active-recording.json
 // (written by `flow42 record` on start, removed on stop). This file is the
 // only IPC surface between the recorder process and the native-host process.
 
@@ -144,12 +144,9 @@ public enum NativeHost {
         FileHandle.standardError.write(data)
 
         // Chrome discards the host's stderr, so also append to a file the
-        // user (or this debugger) can tail. ~/.openclaw/flow42/native-host.log
+        // user (or this debugger) can tail. ~/.flow42/native-host.log
         // grows append-only across all native-host invocations.
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
+        let dir = URL(fileURLWithPath: Flow42Paths.root())
         try? FileManager.default.createDirectory(
             at: dir, withIntermediateDirectories: true
         )
@@ -201,10 +198,6 @@ public enum ActiveRecording {
     }
 
     private static func markerURL() -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
-            .appendingPathComponent("active-recording.json")
+        URL(fileURLWithPath: Flow42Paths.activeRecordingFile())
     }
 }
