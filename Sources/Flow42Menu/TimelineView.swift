@@ -84,6 +84,7 @@ private struct IdleSurface: View {
     @ObservedObject var recordings: RecordingsModel
     @State private var description: String = ""
     @State private var startError: String? = nil
+    @State private var starting: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -106,13 +107,20 @@ private struct IdleSurface: View {
                 Button {
                     startRecording()
                 } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "record.circle.fill")
-                        Text("Start")
+                    HStack(spacing: 6) {
+                        if starting {
+                            ProgressView()
+                                .controlSize(.small)
+                                .progressViewStyle(.circular)
+                        } else {
+                            Image(systemName: "record.circle.fill")
+                        }
+                        Text(starting ? "Starting…" : "Start")
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
+                .disabled(starting)
                 .keyboardShortcut(.defaultAction)
             }
             if let err = startError {
@@ -182,18 +190,27 @@ private struct IdleSurface: View {
 
     private func startRecording() {
         startError = nil
+        starting = true
         var args = ["record", "start"]
         let trimmed = description.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
             args += ["--description", trimmed]
         }
-        let result = Flow42CLI.run(args, timeout: 8)
-        if let result, (result["success"] as? Bool) == true {
-            description = ""
-            // state.json watcher will swap us into RecordingSurface in a tick.
-        } else {
-            let err = (result?["error"] as? String) ?? "could not start recording"
-            startError = err
+        // Off the main actor so the popover stays responsive while the
+        // daemon spawns, even though `record start` typically returns in
+        // <500ms (it's `record stop` that's expensive). Same shape as
+        // the stop handler for consistency.
+        Task { @MainActor in
+            let result = await Flow42CLI.runAsync(args, timeout: 10)
+            starting = false
+            if let result, (result["success"] as? Bool) == true {
+                description = ""
+                // state.json watcher will swap us into RecordingSurface
+                // in a tick.
+            } else {
+                let err = (result?["error"] as? String) ?? "could not start recording"
+                startError = err
+            }
         }
     }
 }
@@ -278,9 +295,13 @@ private struct RecordingSurface: View {
     private var stopBar: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Recording in progress")
+                Text(stopping ? "Finalizing…" : "Recording in progress")
                     .font(.system(size: 12, weight: .semibold))
-                if let slug = state.recording?.slug {
+                if stopping {
+                    Text("Transcribing narration, sorting events…")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                } else if let slug = state.recording?.slug {
                     Text(slug)
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.secondary)
@@ -292,8 +313,14 @@ private struct RecordingSurface: View {
             Button(role: .destructive) {
                 stop()
             } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "stop.circle.fill")
+                HStack(spacing: 6) {
+                    if stopping {
+                        ProgressView()
+                            .controlSize(.small)
+                            .progressViewStyle(.circular)
+                    } else {
+                        Image(systemName: "stop.circle.fill")
+                    }
                     Text(stopping ? "Stopping…" : "Stop")
                 }
             }
@@ -318,17 +345,20 @@ private struct RecordingSurface: View {
     private func stop() {
         stopping = true
         stopError = nil
-        // Flow42CLI.run blocks; the popover's UI freezes momentarily while
-        // the daemon finalises (whisper transcription, ~1–3s typical).
-        // Acceptable for now — the visual "Stopping…" feedback covers it.
-        // If this becomes painful, replace with an async-spawn variant of
-        // Flow42CLI that signals completion via a callback.
-        let result = Flow42CLI.run(["record", "stop"], timeout: 65)
-        stopping = false
-        if let result, (result["success"] as? Bool) == true {
-            // state.json watcher will swap us back to IdleSurface.
-        } else {
-            stopError = (result?["error"] as? String) ?? "stop failed"
+        // `flow42 record stop` blocks on whisper transcription + the
+        // EventsFinalizer sort/renumber pass — that can be 1–30s on a
+        // long recording. We MUST NOT run it on the main actor or the
+        // popover freezes (animations, the timeline tailer, even the
+        // window close hotkey). Spawn it on a detached task and hop
+        // back to the main actor only to flip the state flags.
+        Task { @MainActor in
+            let result = await Flow42CLI.runAsync(["record", "stop"], timeout: 65)
+            stopping = false
+            if let result, (result["success"] as? Bool) == true {
+                // state.json watcher will swap us back to IdleSurface.
+            } else {
+                stopError = (result?["error"] as? String) ?? "stop failed"
+            }
         }
     }
 
