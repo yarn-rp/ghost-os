@@ -101,9 +101,11 @@ final class TimelineModel: ObservableObject {
         // several actions before the popover opened.
         reload()
 
-        // Watch the parent dir so we re-arm when events.jsonl is created
-        // (the recorder creates the file lazily on its first append, and
-        // an FD-on-the-file watch wouldn't fire for that initial create).
+        // Watch the parent dir so we re-arm when events.jsonl is first
+        // created. macOS dir FSEvents fire on child create/rename but
+        // NOT on appends to existing files in the dir, so the dir watch
+        // alone misses live growth. We pair it with a file-FD watch
+        // below once the file exists.
         let dirFD = open(dir, O_EVTONLY)
         if dirFD >= 0 {
             self.dirFD = dirFD
@@ -113,11 +115,54 @@ final class TimelineModel: ObservableObject {
                 queue: .main
             )
             source.setEventHandler { [weak self] in
-                self?.scheduleReload()
+                Task { @MainActor in
+                    // The dir fired — events.jsonl may have just been
+                    // created (or a step folder was added). Reload, then
+                    // try to upgrade to a file-FD watch on events.jsonl.
+                    self?.scheduleReload()
+                    self?.armFileWatcher()
+                }
             }
             source.resume()
             self.dirSource = source
         }
+
+        // First-pass attempt: events.jsonl may already exist if the
+        // daemon was running before the menu popover opened.
+        armFileWatcher()
+    }
+
+    /// Open a file-descriptor watch on events.jsonl so in-place appends
+    /// from the recorder + native host trigger reloads. Idempotent: if a
+    /// watcher is already armed for the current file, this is a no-op.
+    /// Called both from retarget (initial attempt) and from the dir
+    /// watcher's handler (so we pick up the file the moment it's created).
+    private func armFileWatcher() {
+        guard fileSource == nil,
+              let path = sourcePath,
+              FileManager.default.fileExists(atPath: path) else { return }
+
+        let fd = open(path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        fileFD = fd
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .extend, .delete, .rename],
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            Task { @MainActor in
+                self?.scheduleReload()
+            }
+        }
+        source.setCancelHandler { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.fileFD >= 0 { close(self.fileFD); self.fileFD = -1 }
+            }
+        }
+        source.resume()
+        fileSource = source
     }
 
     /// Coalesce FS-event bursts into a single reload ~33 ms later. Each call

@@ -19,11 +19,11 @@
 //
 // Recording dir layout (v2):
 //   ~/.flow42/flows/<slug>/
-//     flow.json           — task metadata + serialized actions
-//     screenshots/        — populated by LearningScreenshot per click
-//     narration.wav       — audio captured during the recording
-//     dom-events.jsonl    — extension-side captures
-//     recorder.log        — daemon stdout/stderr (when run via `start`)
+//     meta.yaml            — session header (name, task, duration, apps)
+//     events.jsonl         — lightweight one-line-per-step index
+//     steps/NNNN-action/   — per-step folder w/ meta.yaml + screenshots
+//     audio/narration.{wav,txt}  — only when narration was captured
+//     recorder.log         — daemon stdout/stderr (when run via `start`)
 
 import Darwin
 import Dispatch

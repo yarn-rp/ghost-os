@@ -1,7 +1,7 @@
 // AudioRecorder.swift - Microphone capture for narration.
 //
 // Captures the default mic at 16 kHz mono PCM (signed 16-bit little-endian)
-// and writes a WAV file at <recordingDir>/narration.wav. Transcription is
+// and writes a WAV file at <recordingDir>/audio/narration.wav. Transcription is
 // performed offline by `whisper-cli` after the recording stops — see
 // NarrationTranscriber.swift.
 //
@@ -48,7 +48,7 @@ nonisolated public final class AudioRecorder: @unchecked Sendable {
     private var bufferCount = 0
     private var lastBufferLog = Date.distantPast
 
-    /// Start capturing the mic into `<recordingDir>/narration.wav`. Returns
+    /// Start capturing the mic into `<recordingDir>/audio/narration.wav`. Returns
     /// nil on success.
     public func start(recordingDir: String) -> StartError? {
         if isRunning { return .alreadyRecording }
@@ -63,8 +63,15 @@ nonisolated public final class AudioRecorder: @unchecked Sendable {
         }
         guard micStatus == .authorized else { return .permissionDenied }
 
-        let url = URL(fileURLWithPath: recordingDir)
-            .appendingPathComponent("narration.wav")
+        // Stage the WAV under audio/ so the recording dir's top level
+        // stays readable (audio/, screenshots/, steps/ — that's the v2
+        // shape).
+        let audioDir = URL(fileURLWithPath: recordingDir)
+            .appendingPathComponent("audio")
+        try? FileManager.default.createDirectory(
+            at: audioDir, withIntermediateDirectories: true
+        )
+        let url = audioDir.appendingPathComponent("narration.wav")
         outputURL = url
 
         // Whisper.cpp expects 16 kHz mono PCM signed-16-bit. We write the file
