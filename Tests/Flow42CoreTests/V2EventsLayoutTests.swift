@@ -50,6 +50,11 @@ struct V2EventsLayoutTests {
         #expect(FileManager.default.fileExists(atPath: "\(stepDir)/screenshot.jpg"))
         #expect(FileManager.default.fileExists(atPath: "\(stepDir)/annotated.jpg"))
 
+        // Move semantics (not copy): the staging files in screenshots/
+        // are gone after writeNewStep claims them.
+        #expect(!FileManager.default.fileExists(atPath: raw))
+        #expect(!FileManager.default.fileExists(atPath: annotated))
+
         // meta.yaml's screenshot field was rewritten to the step folder's
         // canonical path (not the staging path the meta dict came in with).
         let metaText = try String(

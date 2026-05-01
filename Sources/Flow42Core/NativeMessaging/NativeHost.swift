@@ -6,13 +6,14 @@
 // stderr (Chrome discards it; the install command can wire stderr to a log
 // file via a shell shim if you want visibility).
 //
-// V1 message types (extension <-> host):
+// Message types (extension <-> host):
 //   ext -> host: { type: "hello" }
 //                  → host responds { type: "hello-ack", version: "..." }
 //   ext -> host: { type: "active-recording" }
 //                  → host responds { type: "active-recording", recording: {...} | null }
 //   ext -> host: { type: "dom-event", recording: "<slug>", event: {...} }
-//                  → host appends to <recording-dir>/dom-events.jsonl,
+//                  → host writes a step folder under <recording-dir>/steps/
+//                    and appends a one-line index entry to events.jsonl,
 //                    no response needed (fire-and-forget).
 //
 // The recording-active state lives in ~/.flow42/active-recording.json
@@ -78,10 +79,10 @@ public enum NativeHost {
         guard var event = frame["event"] as? [String: Any] else { return }
 
         // Native browser-mode: the user opted out of the extension entirely.
-        // Drop the frame BEFORE we touch the recording dir so dom-events.jsonl
-        // is never created. The extension should also stop sending these
-        // (we surface browser_mode in the active-recording reply), but this
-        // is the authoritative gate either way.
+        // Drop the frame BEFORE we touch the recording dir. The extension
+        // should also stop sending these (we surface browser_mode in the
+        // active-recording reply), but this is the authoritative gate
+        // either way.
         if BrowserMode.current() == .native {
             log("dom-event dropped: BrowserMode=native, ignoring extension")
             return
@@ -101,7 +102,8 @@ public enum NativeHost {
         }
 
         // If the extension included a JPEG, write it to disk and replace the
-        // base64 blob with a relative path. Keeps dom-events.jsonl small.
+        // base64 blob with a relative path. The step-folder writer will
+        // copy it into the canonical step folder.
         if let b64 = event["screenshot_jpeg_base64"] as? String,
            let data = Data(base64Encoded: b64) {
             domScreenshotCounter += 1
@@ -120,26 +122,7 @@ public enum NativeHost {
         }
         event.removeValue(forKey: "screenshot_jpeg_base64")
 
-        guard let line = try? JSONSerialization.data(
-            withJSONObject: event,
-            options: [.withoutEscapingSlashes]
-        ) else { return }
-
-        let path = (dir as NSString).appendingPathComponent("dom-events.jsonl")
-        let url = URL(fileURLWithPath: path)
-        if let handle = try? FileHandle(forWritingTo: url) {
-            try? handle.seekToEnd()
-            try? handle.write(contentsOf: line + Data([0x0a]))
-            try? handle.close()
-        } else {
-            // First write — file doesn't exist yet.
-            try? (line + Data([0x0a])).write(to: url, options: [])
-        }
-
-        // v2 step-folder + events.jsonl write. Phase A keeps dom-events.jsonl
-        // around (above) so FlowJSONWriter's fold-into-flow.json still works
-        // for the menu timeline; Phase B switches the timeline to events.jsonl
-        // and Phase C drops the dom-events.jsonl tee.
+        // Write the canonical v2 step folder + events.jsonl entry.
         writeExtensionStepFolder(recordingDir: dir, event: event)
     }
 
@@ -148,10 +131,10 @@ public enum NativeHost {
     /// scan steps/ for highest, take +1. The recorder daemon allocates
     /// indices in its own process; if one of its appendActions and one
     /// of these extension events land on the same millisecond, both will
-    /// pick the same index and one will end up sharing a folder with the
-    /// other. Acceptable for Phase A (the dom-events.jsonl tee guarantees
-    /// flow.json sees both events regardless); Phase B will move allocation
-    /// behind a single owner.
+    /// pick the same index and the second writer's content lands in the
+    /// first writer's folder. Rare in practice (the user is either
+    /// driving native input or the extension, not both at once); a
+    /// future plan moves allocation behind a single owner.
     private static func writeExtensionStepFolder(
         recordingDir: String,
         event: [String: Any]
@@ -170,9 +153,9 @@ public enum NativeHost {
             : Int64(Date().timeIntervalSince1970 * 1000)
 
         // Lift the screenshot from the event payload into the step folder.
-        // We don't move — copy via the staged source — so the legacy
-        // dom-events.jsonl + flow.json fold can still resolve it at the
-        // original `screenshots/dom-NNN.jpg` path.
+        // The native host wrote it to `screenshots/dom-NNN.jpg` above; the
+        // step-folder writer moves it from there into the step's canonical
+        // `screenshot.jpg` slot.
         let screenshotAbs: String? = {
             guard let rel = event["screenshot"] as? String, !rel.isEmpty
             else { return nil }

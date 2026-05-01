@@ -173,12 +173,11 @@ public enum StepFolderWriter {
         return out.isEmpty ? "unknown" : out
     }
 
-    /// Copy a staged file into the step folder. We COPY (not move) during
-    /// Phase A so the legacy `screenshots/step-NNN.jpg` files stay in
-    /// place for the dual-written flow.json to reference. Phase C will
-    /// switch to move semantics when flow.json goes away.
-    /// Returns the relative path callers should write into meta, or nil
-    /// when the source doesn't exist.
+    /// Move a staged file into the step folder. POSIX rename — atomic on
+    /// the same filesystem (the common case: same recording dir). Falls
+    /// back to copy + unlink if rename fails (different FS, permissions
+    /// edge case, etc.). Returns the relative path callers should write
+    /// into meta, or nil when the source doesn't exist.
     private nonisolated static func move(
         from sourceAbs: String?,
         into destDir: String,
@@ -188,13 +187,18 @@ public enum StepFolderWriter {
         guard let sourceAbs, FileManager.default.fileExists(atPath: sourceAbs)
         else { return nil }
         let destAbs = (destDir as NSString).appendingPathComponent(name)
+        try? FileManager.default.removeItem(atPath: destAbs)
+        if rename(sourceAbs, destAbs) == 0 {
+            return "\(relPrefix)/\(name)"
+        }
+        // Fallback: copy + unlink. Costlier but rare.
         do {
-            try? FileManager.default.removeItem(atPath: destAbs)
             try FileManager.default.copyItem(atPath: sourceAbs, toPath: destAbs)
+            try? FileManager.default.removeItem(atPath: sourceAbs)
             return "\(relPrefix)/\(name)"
         } catch {
             FileHandle.standardError.write(Data(
-                "[StepFolderWriter] copy failed for \(name): \(error.localizedDescription)\n".utf8
+                "[StepFolderWriter] move failed for \(name): \(error.localizedDescription)\n".utf8
             ))
             return nil
         }

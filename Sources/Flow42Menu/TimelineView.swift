@@ -236,8 +236,11 @@ private struct RecordingRow: View {
         }
         .contextMenu {
             Button("Reveal in Finder") {
-                let flowPath = (recording.dir as NSString).appendingPathComponent("flow.json")
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: flowPath)])
+                let target = (recording.dir as NSString).appendingPathComponent("events.jsonl")
+                let url = FileManager.default.fileExists(atPath: target)
+                    ? URL(fileURLWithPath: target)
+                    : URL(fileURLWithPath: recording.dir)
+                NSWorkspace.shared.activateFileViewerSelecting([url])
             }
             Button("Copy slug") {
                 NSPasteboard.general.clearContents()

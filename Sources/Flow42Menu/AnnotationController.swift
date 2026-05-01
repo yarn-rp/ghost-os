@@ -481,9 +481,9 @@ final class AnnotationController: ObservableObject {
         // Pick a slot number that doesn't collide with existing highlights.
         let slotIndex = nextHighlightSlot(in: shotsDir)
         let baseName = String(format: "highlight-%03d", slotIndex)
-        let regionRel = "screenshots/\(baseName).png"
-        let axRel     = "screenshots/\(baseName).ax.json"
-        let visionRel = "screenshots/\(baseName).vision.json"
+        // The staging filenames live under screenshots/ briefly while we
+        // capture the region image and run AX + OCR; writeHighlightStepFolder
+        // promotes them into the canonical step folder afterward.
         let regionAbs = (shotsDir as NSString).appendingPathComponent("\(baseName).png")
         let axAbs     = (shotsDir as NSString).appendingPathComponent("\(baseName).ax.json")
         let visionAbs = (shotsDir as NSString).appendingPathComponent("\(baseName).vision.json")
@@ -568,42 +568,25 @@ final class AnnotationController: ObservableObject {
             try? data.write(to: URL(fileURLWithPath: axAbs))
         }
 
-        // v2: write a self-contained step folder under steps/NNNN-highlight/
+        // Write a self-contained step folder under steps/NNNN-highlight/
         // with the region image, AX subtree, and vision sidecar moved in.
-        // events.jsonl gets a one-line summary the menu timeline (Phase B)
-        // and the structuring agent's Pass 1 will read.
+        // events.jsonl gets a one-line summary the menu timeline and the
+        // structuring agent's Pass 1 will read.
+        //
+        // The step's meta.yaml is enriched with two text representations
+        // of the captured region so an agent never has to read the
+        // sidecar files for the common case:
+        //   - ocr_text:     full OCR transcript from the screenshot pixels
+        //                   (Vision framework). Useful for canvas-rendered
+        //                   text, screenshots-of-screenshots, etc.
+        //   - text_content: text drawn from the AX subtree — element names,
+        //                   labels, values. Useful for structured grounding.
         writeHighlightStepFolder(
             to: recordingDir,
             rect: globalRect,
             regionAbs: regionAbs,
             axAbs: axAbs,
             visionAbs: visionAbs,
-            ocrText: ocrFullText,
-            textContent: Self.flattenAXText(elements),
-            axElementCount: elements.count,
-            appName: frontApp?.localizedName,
-            bundleId: frontApp?.bundleIdentifier
-        )
-
-        // Phase A tee: append a `highlight` event into external-events.jsonl
-        // so the recorder daemon folds it into flow.json on its next rewrite,
-        // keeping the menu timeline working until Phase B switches it to
-        // events.jsonl.
-        //
-        // The event is enriched with two text representations of the
-        // captured region so an agent never has to read the sidecar files
-        // for the common case:
-        //   - ocr_text:     full OCR transcript from the screenshot pixels
-        //                   (Vision framework). Useful for canvas-rendered
-        //                   text, screenshots-of-screenshots, etc.
-        //   - text_content: text drawn from the AX subtree — element names,
-        //                   labels, values. Useful for structured grounding.
-        appendHighlightEvent(
-            to: recordingDir,
-            rect: globalRect,
-            regionRel: regionRel,
-            axRel: axRel,
-            visionRel: visionRel,
             ocrText: ocrFullText,
             textContent: Self.flattenAXText(elements),
             axElementCount: elements.count,
@@ -717,9 +700,9 @@ final class AnnotationController: ObservableObject {
         if let textContent, !textContent.isEmpty { meta["text_content"] = textContent }
 
         // Sidecars: ax.json + vision.json get loaded into memory and
-        // re-emitted by StepFolderWriter so the original files at
-        // screenshots/highlight-NNN.{ax,vision}.json are left in place
-        // for the Phase A flow.json fold.
+        // re-emitted by StepFolderWriter inside the step folder. We
+        // remove the staging originals after so the screenshots/ dir
+        // doesn't accumulate orphans across a session.
         var sidecars: [String: Data] = [:]
         if let axData = try? Data(contentsOf: URL(fileURLWithPath: axAbs)) {
             sidecars["ax.json"] = axData
@@ -728,6 +711,11 @@ final class AnnotationController: ObservableObject {
            let visionData = try? Data(contentsOf: URL(fileURLWithPath: visionAbs)) {
             sidecars["vision.json"] = visionData
         }
+        // Clean up the staging copies — region.png is moved by
+        // StepFolderWriter, ax + vision JSONs are not (they were read
+        // as Data above), so we delete them by hand.
+        try? FileManager.default.removeItem(atPath: axAbs)
+        try? FileManager.default.removeItem(atPath: visionAbs)
 
         let outcome = StepFolderWriter.writeNewStep(
             recordingDir: recordingDir,
@@ -760,73 +748,6 @@ final class AnnotationController: ObservableObject {
             "source": "annotation",
         ]
         EventsJSONLWriter.append(to: recordingDir, entry: entry)
-    }
-
-    /// Append a `highlight` event line to the active recording's
-    /// external-events.jsonl. Source-tagged "annotation" so the daemon's
-    /// finalize step can tell these apart from native CGEvent-tap events.
-    /// Paths are RELATIVE to the recording dir — same convention as the
-    /// recording's other event screenshots — so flow.json is portable.
-    private func appendHighlightEvent(
-        to recordingDir: String,
-        rect: CGRect,
-        regionRel: String,
-        axRel: String,
-        visionRel: String,
-        ocrText: String?,
-        textContent: String?,
-        axElementCount: Int,
-        appName: String?,
-        bundleId: String?
-    ) {
-        var dict: [String: Any] = [
-            "action_type": "highlight",
-            "source": "annotation",
-            "x": Double(rect.origin.x),
-            "y": Double(rect.origin.y),
-            "width": Double(rect.width),
-            "height": Double(rect.height),
-            "screenshot": regionRel,
-            "ax_path": axRel,
-            "vision_path": visionRel,
-            "ax_element_count": axElementCount,
-            "app": appName ?? "",
-            "bundle_id": bundleId ?? "",
-            "timestamp_ms": Int64(Date().timeIntervalSince1970 * 1000),
-        ]
-        // Inline text representations — full transcripts (no truncation).
-        // The full sidecar files are still on disk for callers who need
-        // bounding boxes / per-element metadata.
-        if let ocrText, !ocrText.isEmpty {
-            dict["ocr_text"] = ocrText
-        }
-        if let textContent, !textContent.isEmpty {
-            dict["text_content"] = textContent
-        }
-
-        guard let data = try? JSONSerialization.data(
-            withJSONObject: dict,
-            options: [.withoutEscapingSlashes, .sortedKeys]
-        ) else { return }
-
-        // External writers (us, the Chrome extension, future MCP clients)
-        // emit to sidecar files so they don't race with the daemon's flow.json
-        // rewrites. The daemon merges these in on every action append.
-        let path = (recordingDir as NSString).appendingPathComponent("external-events.jsonl")
-        if !FileManager.default.fileExists(atPath: path) {
-            FileManager.default.createFile(atPath: path, contents: nil)
-        }
-        guard let handle = FileHandle(forWritingAtPath: path) else { return }
-        defer { try? handle.close() }
-        do {
-            try handle.seekToEnd()
-            try handle.write(contentsOf: data)
-            try handle.write(contentsOf: Data([0x0A]))  // \n
-        } catch {
-            FileHandle.standardError.write(Data(
-                "[Flow42Menu] highlight tee failed: \(error.localizedDescription)\n".utf8
-            ))
-        }
     }
 
     /// Concatenate the readable text out of an AX subtree dump. Walks the

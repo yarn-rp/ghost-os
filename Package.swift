@@ -51,7 +51,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "Flow42Menu",
-            dependencies: ["Flow42Core"],
+            dependencies: [
+                "Flow42Core",
+                .product(name: "Yams", package: "Yams"),
+            ],
             path: "Sources/Flow42Menu",
             swiftSettings: concurrencySettings,
             linkerSettings: [

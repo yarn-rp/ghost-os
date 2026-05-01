@@ -344,12 +344,16 @@ enum Record {
                 "actions": [],
                 "warning": error.localizedDescription,
             ]
-            let flowPath = (dir as NSString).appendingPathComponent("flow.json")
+            // Best-effort: drop the warning in the recording dir so the
+            // user can find it without having to read the daemon log.
+            // events.jsonl + steps/ may already exist from a partial
+            // recording; we don't touch them.
+            let warningPath = (dir as NSString).appendingPathComponent("recorder-warning.json")
             if let data = try? JSONSerialization.data(
                 withJSONObject: payload,
                 options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
             ) {
-                try? data.write(to: URL(fileURLWithPath: flowPath))
+                try? data.write(to: URL(fileURLWithPath: warningPath))
             }
             return [
                 "success": true,
@@ -362,7 +366,11 @@ enum Record {
             let duration = Date().timeIntervalSince(session.startTime)
 
             // Narration is only available now (whisper runs at stop time).
-            var narrationDicts: [[String: Any]] = []
+            // Each segment becomes its own step folder so it shows up in
+            // the timeline interleaved with native + extension events,
+            // and the full transcript is written to audio/narration.txt
+            // for the agent's Pass 1 to read.
+            var narrationCount = 0
             if let wavURL,
                FileManager.default.fileExists(atPath: wavURL.path),
                let size = try? wavURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
@@ -371,21 +379,54 @@ enum Record {
                 do {
                     let segments = try NarrationTranscriber.transcribe(wavURL: wavURL)
                     let startMs = Int64(session.startTime.timeIntervalSince1970 * 1000)
+                    var transcriptLines: [String] = []
                     for seg in segments {
-                        narrationDicts.append([
+                        let stepIndex = StepFolderWriter.highestExistingIndex(in: dir) + 1
+                        let timestampMs = startMs + Int64(seg.startMs)
+                        let meta: [String: Any] = [
                             "action_type": "narration",
-                            "text": seg.text,
-                            "app": "",
-                            "bundle_id": "",
-                            "window": NSNull(),
-                            "url": NSNull(),
-                            "element": NSNull(),
-                            "screenshot": NSNull(),
-                            "annotated_screenshot": NSNull(),
-                            "timestamp_ms": startMs + Int64(seg.startMs),
-                            "duration_ms": seg.endMs - seg.startMs,
                             "source": "narration",
-                        ])
+                            "text": seg.text,
+                            "duration_ms": seg.endMs - seg.startMs,
+                            "timestamp_ms": timestampMs,
+                        ]
+                        if let outcome = StepFolderWriter.writeNewStep(
+                            recordingDir: dir,
+                            stepIndex: stepIndex,
+                            actionType: "narration",
+                            meta: meta,
+                            screenshotSourceAbs: nil,
+                            annotatedScreenshotSourceAbs: nil
+                        ) {
+                            let entry: [String: Any] = [
+                                "idx": outcome.stepIndex,
+                                "step_dir": outcome.stepDirRelative,
+                                "action_type": "narration",
+                                "app": "",
+                                "summary": "narration: \(seg.text.prefix(80))",
+                                "timestamp_ms": timestampMs,
+                                "source": "narration",
+                            ]
+                            EventsJSONLWriter.append(to: dir, entry: entry)
+                            narrationCount += 1
+                        }
+                        // Plain-text transcript line for audio/narration.txt.
+                        // Format: "[+SS.mss] text" so the agent reading it
+                        // gets the timing alongside the words.
+                        let offsetSec = Double(seg.startMs) / 1000.0
+                        transcriptLines.append(String(
+                            format: "[+%05.2f] %@", offsetSec, seg.text as CVarArg
+                        ))
+                    }
+                    if !transcriptLines.isEmpty {
+                        let audioDir = (dir as NSString).appendingPathComponent("audio")
+                        try? FileManager.default.createDirectory(
+                            atPath: audioDir, withIntermediateDirectories: true
+                        )
+                        let txtPath = (audioDir as NSString)
+                            .appendingPathComponent("narration.txt")
+                        try? transcriptLines.joined(separator: "\n")
+                            .write(toFile: txtPath, atomically: true, encoding: .utf8)
                     }
                     FileHandle.standardError.write(Data(
                         "Narration: \(segments.count) segment\(segments.count == 1 ? "" : "s")\n".utf8
@@ -397,29 +438,27 @@ enum Record {
                 }
             }
 
-            // FlowJSONWriter is the single place that knows how to merge
-            // native + narration + dom-events + external-events. It's been
-            // writing flow.json incrementally throughout the recording; this
-            // is the FINAL write that adds narration and seals the file.
-            FlowJSONWriter.write(
-                session: session,
-                slug: slug,
-                dir: dir,
-                narrationDicts: narrationDicts,
-                final: true
-            )
+            let actionCount = actions.count + narrationCount
 
-            // Re-read the action_count from the freshly written file so we
-            // report the merged total (native + narration + ext + dom).
-            let flowPath = (dir as NSString).appendingPathComponent("flow.json")
-            let actionCount: Int
-            if let data = try? Data(contentsOf: URL(fileURLWithPath: flowPath)),
-               let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-               let n = parsed["action_count"] as? Int {
-                actionCount = n
-            } else {
-                actionCount = actions.count + narrationDicts.count
-            }
+            // Top-level meta.yaml — session metadata the menu app's
+            // recordings list and the agent's structuring pass both
+            // read. Replaces the flow.json header from the v1 layout.
+            let isoDate = ISO8601DateFormatter()
+            isoDate.formatOptions = [.withInternetDateTime]
+            let metaDict: [String: Any] = [
+                "schema_version": 2,
+                "name": slug,
+                "task_description": session.taskDescription ?? "",
+                "recorded_at": isoDate.string(from: session.startTime),
+                "duration_seconds": Int(duration),
+                "action_count": actionCount,
+                "apps": Array(session.apps).sorted(),
+                "urls": session.urls,
+                "finalized": true,
+            ]
+            let metaPath = (dir as NSString).appendingPathComponent("meta.yaml")
+            try? YAMLEmit.mapping(metaDict)
+                .write(toFile: metaPath, atomically: true, encoding: .utf8)
 
             return [
                 "success": true,

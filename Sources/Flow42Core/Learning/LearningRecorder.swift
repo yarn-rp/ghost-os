@@ -485,10 +485,6 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
             }
         }
 
-        // ---- legacy flow.json tee (Phase A only) -------------------------
-        // The menu timeline tails flow.json today. Phase B switches it to
-        // events.jsonl, after which we drop this tee.
-        FlowJSONWriter.write(session: snapshot, slug: snapshotSlug(dir: dir), dir: dir)
     }
 
     /// Recover the step index from a folder name like "steps/0007-typeText".
@@ -642,9 +638,9 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
 
         os_unfair_lock_unlock(&lock)
 
-        if consumed, let snapshot, let dir = snapshot.recordingDir {
-            FlowJSONWriter.write(session: snapshot, slug: snapshotSlug(dir: dir), dir: dir)
-        }
+        // The v2 step-folder update happened above under the lock — once
+        // flow.json's tee is gone there's nothing left to do here.
+        _ = snapshot
         return consumed
     }
 
@@ -696,12 +692,13 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
         // in one window) — would overwrite the title's event with the
         // body's text. So: buffer wins when present, prev typeText only
         // when there's no buffer.
+        var mutatedAction: ObservedAction? = nil
         if !pendingKeystrokes.isEmpty {
             if pendingKeystrokes != value {
                 pendingKeystrokes = value
             }
             // No session mutation; the buffer is internal state that
-            // surfaces in flow.json only at flush time.
+            // gets flushed into a step folder later.
         } else if let lastIdx = session?.actions.indices.last,
                   let prev = session?.actions[lastIdx],
                   case .typeText(let prevText) = prev.action,
@@ -715,7 +712,7 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
             if value.isEmpty {
                 session?.actions.remove(at: lastIdx)
             } else {
-                session?.actions[lastIdx] = ObservedAction(
+                let newAction = ObservedAction(
                     timestamp: prev.timestamp,
                     action: .typeText(text: value),
                     appName: prev.appName,
@@ -726,16 +723,46 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
                     screenshotPath: prev.screenshotPath,
                     annotatedScreenshotPath: prev.annotatedScreenshotPath
                 )
+                session?.actions[lastIdx] = newAction
+                mutatedAction = newAction
             }
             sessionChanged = true
             snapshot = session
+
+            // v2 step-folder meta.yaml update for the AX correction. Same
+            // shape as the coalesce / backspace path: rewrite meta in
+            // place, append a fresh events.jsonl line (consumers dedupe
+            // on step_dir, last write wins).
+            if let dir = snapshot?.recordingDir,
+               let lastDir = v2LastStepDirRel,
+               let mutated = mutatedAction {
+                let timestampMs = machToWallClockMs(
+                    mutated.timestamp,
+                    startMach: snapshot!.startMach,
+                    startWallClock: snapshot!.startTime
+                )
+                var meta = LearningDispatch.serializeStepMeta(mutated, timestampMs: timestampMs)
+                meta["screenshot"] = "\(lastDir)/screenshot.jpg"
+                meta["annotated_screenshot"] = "\(lastDir)/annotated.jpg"
+                _ = StepFolderWriter.updateStepMeta(
+                    recordingDir: dir,
+                    stepDirRelative: lastDir,
+                    meta: meta
+                )
+                let entry = LearningDispatch.serializeIndexEntry(
+                    mutated,
+                    stepIndex: parseLeadingIndex(stepDirRel: lastDir),
+                    stepDirRelative: lastDir,
+                    timestampMs: timestampMs,
+                    source: "native"
+                )
+                EventsJSONLWriter.append(to: dir, entry: entry)
+            }
         }
 
         os_unfair_lock_unlock(&lock)
-
-        if sessionChanged, let snapshot, let dir = snapshot.recordingDir {
-            FlowJSONWriter.write(session: snapshot, slug: snapshotSlug(dir: dir), dir: dir)
-        }
+        _ = sessionChanged
+        _ = snapshot
     }
 
     /// Option+Delete: drop the trailing word as the immediate approximation,

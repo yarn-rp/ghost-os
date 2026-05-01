@@ -5,6 +5,7 @@ import AppKit
 import Combine
 import Flow42Core
 import Foundation
+import Yams
 
 struct RecordingSummary: Identifiable {
     let id: String           // slug == directory name
@@ -66,20 +67,22 @@ final class RecordingsModel: ObservableObject {
     }
 
     private func parse(slug: String, dir: String) -> RecordingSummary {
-        let flowPath = (dir as NSString).appendingPathComponent("flow.json")
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: flowPath)),
-              let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else {
-            return RecordingSummary(
-                id: slug, dir: dir,
-                taskDescription: nil, recordedAt: nil,
-                durationSeconds: nil, actionCount: nil, apps: []
-            )
+        // v2: read meta.yaml (session header) for task description, apps,
+        // duration. Action count is the line count of events.jsonl —
+        // cheaper than parsing the YAML's `action_count` field and stays
+        // accurate even before finalize writes meta.yaml.
+        let metaPath = (dir as NSString).appendingPathComponent("meta.yaml")
+        let dict: [String: Any]
+        if let yamlText = try? String(contentsOf: URL(fileURLWithPath: metaPath), encoding: .utf8),
+           let parsed = try? Yams.load(yaml: yamlText) as? [String: Any] {
+            dict = parsed
+        } else {
+            dict = [:]
         }
         let taskDescription = (dict["task_description"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let recordedAt = (dict["recorded_at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
         let duration = (dict["duration_seconds"] as? Int) ?? (dict["duration_seconds"] as? Double).map(Int.init)
-        let actionCount = dict["action_count"] as? Int
+        let actionCount = countEventsJsonlLines(dir: dir) ?? (dict["action_count"] as? Int)
         let apps = (dict["apps"] as? [String]) ?? []
         return RecordingSummary(
             id: slug, dir: dir,
@@ -93,5 +96,18 @@ final class RecordingsModel: ObservableObject {
 
     private func recipesRoot() -> String {
         Flow42Paths.flowsRoot()
+    }
+
+    /// Count newline-terminated entries in events.jsonl. Cheap; called
+    /// once per recording in the popover's idle list. Returns nil when
+    /// the file doesn't exist (recording with no captured events).
+    private func countEventsJsonlLines(dir: String) -> Int? {
+        let path = (dir as NSString).appendingPathComponent("events.jsonl")
+        guard FileManager.default.fileExists(atPath: path),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let s = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return s.split(separator: "\n", omittingEmptySubsequences: true).count
     }
 }
