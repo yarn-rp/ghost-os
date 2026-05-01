@@ -20,6 +20,11 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/steipete/AXorcist.git", from: "0.1.0"),
+        // Yams: read-only YAML for `flow42 view` (parses the agent-authored
+        // flow.yaml). Swift never parses YAML during recording — only emits
+        // meta.yaml via Flow42Core/Common/YAMLEmit. So Yams lives in the
+        // CLI target, not in Flow42Core.
+        .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.0"),
     ],
     targets: [
         .target(
@@ -37,7 +42,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "flow42",
-            dependencies: ["Flow42Core"],
+            dependencies: [
+                "Flow42Core",
+                .product(name: "Yams", package: "Yams"),
+            ],
             path: "Sources/flow42",
             swiftSettings: concurrencySettings
         ),

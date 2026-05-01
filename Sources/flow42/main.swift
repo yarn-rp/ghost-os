@@ -94,6 +94,12 @@ case "mode":
 case "annotations":
     Annotations.run(args: Array(args.dropFirst()))
 
+case "view":
+    View.run(args: Array(args.dropFirst()))
+
+case "structure":
+    Structure.run(args: Array(args.dropFirst()))
+
 case "install":
     Install.run(args: Array(args.dropFirst()))
 
@@ -165,6 +171,9 @@ func printUsage() {
       wait           Poll for a condition with timeout (urlContains, elementExists, …)
       mode           Get/set the menu app's mode (idle | recording | autonomous)
       annotations    List/show/clear annotations captured via Cmd+Shift+A
+      structure      Prepare a recording for the agent's three-pass structuring
+      view           Render a recorded flow.yaml as markdown (human or
+                     headless-script audience)
       chrome-launch  Launch Chrome with the local debug endpoint enabled
       setup-browser  One-shot wizard: launch Chrome, auto-load extension, register
                      native-messaging manifest, verify the round-trip
