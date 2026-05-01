@@ -568,10 +568,27 @@ final class AnnotationController: ObservableObject {
             try? data.write(to: URL(fileURLWithPath: axAbs))
         }
 
-        // Append a `highlight` event into the recording's external-events.jsonl
-        // pointing at the relative paths we just wrote. The recorder daemon
-        // folds external-events.jsonl into flow.json on every action append,
-        // so this event surfaces in the live timeline immediately.
+        // v2: write a self-contained step folder under steps/NNNN-highlight/
+        // with the region image, AX subtree, and vision sidecar moved in.
+        // events.jsonl gets a one-line summary the menu timeline (Phase B)
+        // and the structuring agent's Pass 1 will read.
+        writeHighlightStepFolder(
+            to: recordingDir,
+            rect: globalRect,
+            regionAbs: regionAbs,
+            axAbs: axAbs,
+            visionAbs: visionAbs,
+            ocrText: ocrFullText,
+            textContent: Self.flattenAXText(elements),
+            axElementCount: elements.count,
+            appName: frontApp?.localizedName,
+            bundleId: frontApp?.bundleIdentifier
+        )
+
+        // Phase A tee: append a `highlight` event into external-events.jsonl
+        // so the recorder daemon folds it into flow.json on its next rewrite,
+        // keeping the menu timeline working until Phase B switches it to
+        // events.jsonl.
         //
         // The event is enriched with two text representations of the
         // captured region so an agent never has to read the sidecar files
@@ -647,6 +664,102 @@ final class AnnotationController: ObservableObject {
             ))
             return nil
         }
+    }
+
+    /// v2 path: write a self-contained step folder for this highlight.
+    /// Region PNG, AX subtree, and vision sidecar are MOVED into
+    /// `steps/NNNN-highlight/` (the legacy Phase-A `screenshots/highlight-NNN.*`
+    /// staging files have already been written by the caller; this method
+    /// promotes them into the canonical step layout). The events.jsonl
+    /// line gets `source: "annotation"` so consumers can tell native
+    /// CGEvent-tap events apart from menu-app-sourced ones.
+    ///
+    /// Step index race: the recorder daemon and the menu app both allocate
+    /// step indices independently; we reduce the collision window by
+    /// scanning `steps/` right before the write. If two writers somehow
+    /// pick the same index, StepFolderWriter's `mkdir -p` is idempotent
+    /// and the second writer's content lands in the first writer's folder
+    /// — annoying but not data loss. Phase B will replace this with a
+    /// single allocator on the daemon side.
+    private func writeHighlightStepFolder(
+        to recordingDir: String,
+        rect: CGRect,
+        regionAbs: String,
+        axAbs: String,
+        visionAbs: String,
+        ocrText: String?,
+        textContent: String?,
+        axElementCount: Int,
+        appName: String?,
+        bundleId: String?
+    ) {
+        let stepIndex = StepFolderWriter.highestExistingIndex(in: recordingDir) + 1
+        let timestampMs = Int64(Date().timeIntervalSince1970 * 1000)
+
+        // Per-step meta carries the same fields the legacy external-events
+        // line did, plus the rect coordinates and (optionally) the inline
+        // text representations. StepFolderWriter rewrites `screenshot`,
+        // `ax_path`, and `vision_path` to point at the destination
+        // filenames inside the step folder.
+        var meta: [String: Any] = [
+            "action_type": "highlight",
+            "source": "annotation",
+            "x": Double(rect.origin.x),
+            "y": Double(rect.origin.y),
+            "width": Double(rect.width),
+            "height": Double(rect.height),
+            "ax_element_count": axElementCount,
+            "app": appName ?? "",
+            "bundle_id": bundleId ?? "",
+            "timestamp_ms": timestampMs,
+        ]
+        if let ocrText, !ocrText.isEmpty { meta["ocr_text"] = ocrText }
+        if let textContent, !textContent.isEmpty { meta["text_content"] = textContent }
+
+        // Sidecars: ax.json + vision.json get loaded into memory and
+        // re-emitted by StepFolderWriter so the original files at
+        // screenshots/highlight-NNN.{ax,vision}.json are left in place
+        // for the Phase A flow.json fold.
+        var sidecars: [String: Data] = [:]
+        if let axData = try? Data(contentsOf: URL(fileURLWithPath: axAbs)) {
+            sidecars["ax.json"] = axData
+        }
+        if FileManager.default.fileExists(atPath: visionAbs),
+           let visionData = try? Data(contentsOf: URL(fileURLWithPath: visionAbs)) {
+            sidecars["vision.json"] = visionData
+        }
+
+        let outcome = StepFolderWriter.writeNewStep(
+            recordingDir: recordingDir,
+            stepIndex: stepIndex,
+            actionType: "highlight",
+            meta: meta,
+            screenshotSourceAbs: regionAbs,
+            annotatedScreenshotSourceAbs: nil,         // no marker — the
+                                                       // region itself is
+                                                       // the visual.
+            sidecars: sidecars,
+            screenshotDestName: "region.png"
+        )
+
+        guard let outcome else { return }
+
+        // events.jsonl line. We hand-build it (rather than going through
+        // LearningDispatch.serializeIndexEntry, which expects an
+        // ObservedAction) because annotations don't have one of those —
+        // they live in a different process entirely.
+        let summary = "highlight \(Int(rect.width))×\(Int(rect.height))"
+            + (appName.map { " in \($0)" } ?? "")
+        let entry: [String: Any] = [
+            "idx": outcome.stepIndex,
+            "step_dir": outcome.stepDirRelative,
+            "action_type": "highlight",
+            "app": appName ?? "",
+            "summary": summary,
+            "timestamp_ms": timestampMs,
+            "source": "annotation",
+        ]
+        EventsJSONLWriter.append(to: recordingDir, entry: entry)
     }
 
     /// Append a `highlight` event line to the active recording's

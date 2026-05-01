@@ -52,7 +52,9 @@ public enum StepFolderWriter {
         meta: [String: Any],
         screenshotSourceAbs: String?,
         annotatedScreenshotSourceAbs: String?,
-        sidecars: [String: Data] = [:]
+        sidecars: [String: Data] = [:],
+        screenshotDestName: String = "screenshot.jpg",
+        annotatedDestName: String = "annotated.jpg"
     ) -> Outcome? {
         let folderName = makeFolderName(index: stepIndex, actionType: actionType)
         let stepsRoot = (recordingDir as NSString).appendingPathComponent("steps")
@@ -74,7 +76,7 @@ public enum StepFolderWriter {
         let screenshotRel = move(
             from: screenshotSourceAbs,
             into: absDir,
-            named: "screenshot.jpg",
+            named: screenshotDestName,
             relPrefix: relDir
         )
         if let screenshotRel { resolvedMeta["screenshot"] = screenshotRel }
@@ -83,7 +85,7 @@ public enum StepFolderWriter {
         let annotatedRel = move(
             from: annotatedScreenshotSourceAbs,
             into: absDir,
-            named: "annotated.jpg",
+            named: annotatedDestName,
             relPrefix: relDir
         )
         if let annotatedRel { resolvedMeta["annotated_screenshot"] = annotatedRel }

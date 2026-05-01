@@ -135,6 +135,92 @@ public enum NativeHost {
             // First write — file doesn't exist yet.
             try? (line + Data([0x0a])).write(to: url, options: [])
         }
+
+        // v2 step-folder + events.jsonl write. Phase A keeps dom-events.jsonl
+        // around (above) so FlowJSONWriter's fold-into-flow.json still works
+        // for the menu timeline; Phase B switches the timeline to events.jsonl
+        // and Phase C drops the dom-events.jsonl tee.
+        writeExtensionStepFolder(recordingDir: dir, event: event)
+    }
+
+    /// Mirror an extension dom-event into a v2 step folder.
+    /// Step index race: same shape as the annotation controller path —
+    /// scan steps/ for highest, take +1. The recorder daemon allocates
+    /// indices in its own process; if one of its appendActions and one
+    /// of these extension events land on the same millisecond, both will
+    /// pick the same index and one will end up sharing a folder with the
+    /// other. Acceptable for Phase A (the dom-events.jsonl tee guarantees
+    /// flow.json sees both events regardless); Phase B will move allocation
+    /// behind a single owner.
+    private static func writeExtensionStepFolder(
+        recordingDir: String,
+        event: [String: Any]
+    ) {
+        let actionType = (event["action_type"] as? String) ?? "extensionEvent"
+        let stepIndex = StepFolderWriter.highestExistingIndex(in: recordingDir) + 1
+        // Fall back to wall-clock if the extension didn't tag one. The
+        // recorder's serializeIndexEntry path sorts by timestamp_ms at view
+        // time, so giving up here would mis-order the timeline. The
+        // extension uses `Date.now()` (Int64 ms since epoch) when it tags.
+        let extensionTs = (event["timestamp_ms"] as? Int64)
+            ?? (event["timestamp_ms"] as? Int).map(Int64.init)
+            ?? Int64((event["timestamp_ms"] as? Double) ?? 0)
+        let timestampMs = extensionTs > 0
+            ? extensionTs
+            : Int64(Date().timeIntervalSince1970 * 1000)
+
+        // Lift the screenshot from the event payload into the step folder.
+        // We don't move — copy via the staged source — so the legacy
+        // dom-events.jsonl + flow.json fold can still resolve it at the
+        // original `screenshots/dom-NNN.jpg` path.
+        let screenshotAbs: String? = {
+            guard let rel = event["screenshot"] as? String, !rel.isEmpty
+            else { return nil }
+            return (recordingDir as NSString).appendingPathComponent(rel)
+        }()
+
+        // The meta.yaml is the event payload itself, plus a `source` tag and
+        // a `timestamp_ms` if the extension didn't supply one. We pass it
+        // through; StepFolderWriter rewrites the `screenshot` field to the
+        // step-folder-relative path of the copied file.
+        var meta = event
+        meta["source"] = "extension"
+        meta["timestamp_ms"] = timestampMs
+
+        let outcome = StepFolderWriter.writeNewStep(
+            recordingDir: recordingDir,
+            stepIndex: stepIndex,
+            actionType: actionType,
+            meta: meta,
+            screenshotSourceAbs: screenshotAbs,
+            annotatedScreenshotSourceAbs: nil
+        )
+
+        guard let outcome else { return }
+
+        // events.jsonl summary line. Same shape as the native recorder's
+        // serializeIndexEntry output; consumers shouldn't have to know the
+        // source to render a row.
+        let app = (event["app"] as? String) ?? ""
+        let url = (event["url"] as? String) ?? ""
+        let summary: String = {
+            if let locator = (event["element"] as? [String: Any])?["locator"] as? String,
+               !locator.isEmpty {
+                return "\(actionType) \(locator)"
+            }
+            return actionType
+        }()
+        var entry: [String: Any] = [
+            "idx": outcome.stepIndex,
+            "step_dir": outcome.stepDirRelative,
+            "action_type": actionType,
+            "app": app,
+            "summary": summary,
+            "timestamp_ms": timestampMs,
+            "source": "extension",
+        ]
+        if !url.isEmpty { entry["url"] = url }
+        EventsJSONLWriter.append(to: recordingDir, entry: entry)
     }
 
     private static func log(_ message: String) {
