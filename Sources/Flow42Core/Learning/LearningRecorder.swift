@@ -60,6 +60,22 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
     /// 0 = "menu app not running", check skipped.
     private var menuAppPid: pid_t = 0
 
+    // MARK: - v2 layout state
+    //
+    // v2 writes one folder per step under `steps/NNNN-action_type/`, plus a
+    // lightweight `events.jsonl` index at the recording-dir root. We track
+    // two pieces of state across appendAction calls:
+    //   - v2NextStepIndex: monotonically increasing folder counter. Resumes
+    //     from the highest existing index on session start (so a daemon
+    //     crash doesn't trample the previous run's folders).
+    //   - v2LastStepDirRel: the relative path of the most recently written
+    //     step folder. Used by the typeText coalesce path to update the
+    //     existing folder's meta.yaml in place rather than allocating a new
+    //     one. Also used to rewrite a coalesced action's screenshot pointer
+    //     onto the canonical step-folder path for flow.json's tee.
+    private var v2NextStepIndex: Int = 0
+    private var v2LastStepDirRel: String?
+
     private init() {}
 
     // MARK: - Public API
@@ -95,6 +111,10 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
                 atPath: shotsDir,
                 withIntermediateDirectories: true
             )
+            // v2 step state: resume from the highest existing folder index
+            // so a crashed-and-restarted daemon doesn't trample prior steps.
+            v2NextStepIndex = StepFolderWriter.highestExistingIndex(in: dir)
+            v2LastStepDirRel = nil
         }
 
         let thread = Thread { [weak self] in self?.runLearningThread() }
@@ -308,6 +328,9 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
 
     public func appendAction(_ action: ObservedAction) {
         var snapshot: LearningSession? = nil
+        var coalesced = false
+        var finalAction: ObservedAction = action
+
         os_unfair_lock_lock(&lock)
 
         // Same-target coalescing for typeText: when the previous action is
@@ -317,7 +340,14 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
         // typeText("hello world") action. Backspace handling is in
         // handleBackspaceIfTextEdit() — those mutate the same last action
         // in-place rather than emitting keyPress(Delete).
-        let coalesced: Bool = {
+        //
+        // v2 wrinkle: when a coalesce wins, we *also* need to rewrite the
+        // merged action's screenshot pointer to the existing step folder's
+        // canonical screenshot.jpg / annotated.jpg path. Otherwise the
+        // tee'd flow.json would still reference the pre-move screenshots/
+        // file (Phase A: we copy, so it survives — but the canonical path
+        // is the step folder one, and Phase C will rip the tee out).
+        coalesced = {
             guard case .typeText(let newText) = action.action,
                   let lastIdx = session?.actions.indices.last,
                   let prev = session?.actions[lastIdx],
@@ -331,6 +361,20 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
                   Self.machDeltaToSeconds(action.timestamp &- prev.timestamp) < 300
             else { return false }
 
+            // For coalesce, the canonical screenshot path is whatever the
+            // step folder already holds. v2LastStepDirRel points at it.
+            // Fall back to today's behaviour when v2 isn't engaged (no
+            // recordingDir → no step folders).
+            let mergedScreenshot: String?
+            let mergedAnnotated: String?
+            if let lastDir = self.v2LastStepDirRel {
+                mergedScreenshot = "\(lastDir)/screenshot.jpg"
+                mergedAnnotated = "\(lastDir)/annotated.jpg"
+            } else {
+                mergedScreenshot = action.screenshotPath ?? prev.screenshotPath
+                mergedAnnotated = action.annotatedScreenshotPath ?? prev.annotatedScreenshotPath
+            }
+
             let merged = ObservedAction(
                 timestamp: prev.timestamp,            // keep original onset
                 action: .typeText(text: prevText + newText),
@@ -339,15 +383,17 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
                 windowTitle: action.windowTitle,
                 url: action.url,
                 elementContext: action.elementContext,
-                screenshotPath: action.screenshotPath ?? prev.screenshotPath,
-                annotatedScreenshotPath: action.annotatedScreenshotPath ?? prev.annotatedScreenshotPath
+                screenshotPath: mergedScreenshot,
+                annotatedScreenshotPath: mergedAnnotated
             )
             session?.actions[lastIdx] = merged
+            finalAction = merged
             return true
         }()
 
         if !coalesced {
             session?.actions.append(action)
+            finalAction = action
         }
         if !action.appName.isEmpty { session?.apps.insert(action.appName) }
         if let url = action.url, !url.isEmpty, !(session?.urls.contains(url) ?? false) {
@@ -356,13 +402,102 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
         snapshot = session
         os_unfair_lock_unlock(&lock)
 
-        // flow.json is the single source of truth — rewritten on every
-        // action append. Atomic (write-temp + rename) so the menu app's
-        // tailer never reads a half-written file. Done outside the lock
-        // because it's slow I/O and we already snapshot the session.
-        if let snapshot, let dir = snapshot.recordingDir {
-            FlowJSONWriter.write(session: snapshot, slug: snapshotSlug(dir: dir), dir: dir)
+        guard let snapshot, let dir = snapshot.recordingDir else { return }
+
+        // ---- v2 step-folder write ----------------------------------------
+        // Order matters: write the step folder first so the events.jsonl
+        // tailer doesn't see a "step exists" line referencing a folder
+        // whose meta.yaml hasn't landed yet. StepFolderWriter writes
+        // meta.yaml LAST inside the folder so a partially-written folder
+        // is only visible if everything else (screenshots, sidecars) is
+        // already in place.
+        let timestampMs = machToWallClockMs(
+            finalAction.timestamp,
+            startMach: snapshot.startMach,
+            startWallClock: snapshot.startTime
+        )
+
+        if coalesced, let lastDir = v2LastStepDirRel {
+            // Rewrite the existing step folder's meta.yaml in place. The
+            // screenshot stays as it was (the first shot of the burst is
+            // the most informative — no point overwriting it with a later
+            // capture of the same field).
+            var meta = LearningDispatch.serializeStepMeta(finalAction, timestampMs: timestampMs)
+            // Re-anchor the screenshot fields to the step folder's
+            // canonical names, since the meta dict starts from the
+            // action's screenshot paths which we just rewrote.
+            meta["screenshot"] = "\(lastDir)/screenshot.jpg"
+            meta["annotated_screenshot"] = "\(lastDir)/annotated.jpg"
+            _ = StepFolderWriter.updateStepMeta(
+                recordingDir: dir,
+                stepDirRelative: lastDir,
+                meta: meta
+            )
+            // Append a fresh events.jsonl line — readers dedupe on
+            // step_dir, last line wins. Cheaper than rewriting the whole
+            // file and crash-safe.
+            let entry = LearningDispatch.serializeIndexEntry(
+                finalAction,
+                stepIndex: parseLeadingIndex(stepDirRel: lastDir),
+                stepDirRelative: lastDir,
+                timestampMs: timestampMs,
+                source: "native"
+            )
+            EventsJSONLWriter.append(to: dir, entry: entry)
+        } else {
+            os_unfair_lock_lock(&lock)
+            v2NextStepIndex += 1
+            let stepIndex = v2NextStepIndex
+            os_unfair_lock_unlock(&lock)
+
+            let actionType = LearningDispatch.actionTypeSlug(finalAction.action)
+            let meta = LearningDispatch.serializeStepMeta(finalAction, timestampMs: timestampMs)
+
+            // Translate the action's relative screenshot paths to absolute
+            // staging paths so StepFolderWriter can copy them in.
+            let screenshotAbs = finalAction.screenshotPath
+                .map { (dir as NSString).appendingPathComponent($0) }
+            let annotatedAbs = finalAction.annotatedScreenshotPath
+                .map { (dir as NSString).appendingPathComponent($0) }
+
+            let outcome = StepFolderWriter.writeNewStep(
+                recordingDir: dir,
+                stepIndex: stepIndex,
+                actionType: actionType,
+                meta: meta,
+                screenshotSourceAbs: screenshotAbs,
+                annotatedScreenshotSourceAbs: annotatedAbs
+            )
+
+            if let outcome {
+                os_unfair_lock_lock(&lock)
+                v2LastStepDirRel = outcome.stepDirRelative
+                os_unfair_lock_unlock(&lock)
+
+                let entry = LearningDispatch.serializeIndexEntry(
+                    finalAction,
+                    stepIndex: outcome.stepIndex,
+                    stepDirRelative: outcome.stepDirRelative,
+                    timestampMs: timestampMs,
+                    source: "native"
+                )
+                EventsJSONLWriter.append(to: dir, entry: entry)
+            }
         }
+
+        // ---- legacy flow.json tee (Phase A only) -------------------------
+        // The menu timeline tails flow.json today. Phase B switches it to
+        // events.jsonl, after which we drop this tee.
+        FlowJSONWriter.write(session: snapshot, slug: snapshotSlug(dir: dir), dir: dir)
+    }
+
+    /// Recover the step index from a folder name like "steps/0007-typeText".
+    /// Used in the coalesce path where we want to write the new index entry
+    /// without reallocating a step number.
+    private nonisolated func parseLeadingIndex(stepDirRel: String) -> Int {
+        let last = (stepDirRel as NSString).lastPathComponent
+        let digits = last.prefix(while: { $0.isNumber })
+        return Int(digits) ?? 0
     }
 
     /// The slug is encoded in the recording dir's last path component.
@@ -447,10 +582,17 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
             currentTarget: currentTarget
            ) {
             let trimmed = transform(prevText)
+            var mutatedAction: ObservedAction? = nil
             if trimmed.isEmpty {
+                // Backspace ate the whole word. Drop the typeText action.
+                // The v2 step folder is left in place (a "ghost" with empty
+                // text); a follow-up pass at finalize can clean it up.
+                // Treating the gone-to-empty case as a folder-deletion is
+                // tempting but invasive — we'd have to reset v2LastStepDirRel
+                // to the new tail, which means re-scanning. Defer.
                 session?.actions.remove(at: lastIdx)
             } else {
-                session?.actions[lastIdx] = ObservedAction(
+                let newAction = ObservedAction(
                     timestamp: prev.timestamp,
                     action: .typeText(text: trimmed),
                     appName: prev.appName,
@@ -461,9 +603,41 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
                     screenshotPath: prev.screenshotPath,
                     annotatedScreenshotPath: prev.annotatedScreenshotPath
                 )
+                session?.actions[lastIdx] = newAction
+                mutatedAction = newAction
             }
             consumed = true
             snapshot = session
+
+            // v2 step-folder update. Done under the lock so the meta.yaml
+            // we write reflects the same in-memory state we just snapshotted
+            // (no torn write where flow.json sees the trim but meta.yaml
+            // sees the pre-trim text or vice versa).
+            if let dir = snapshot?.recordingDir,
+               let lastDir = v2LastStepDirRel,
+               let mutated = mutatedAction {
+                let timestampMs = machToWallClockMs(
+                    mutated.timestamp,
+                    startMach: snapshot!.startMach,
+                    startWallClock: snapshot!.startTime
+                )
+                var meta = LearningDispatch.serializeStepMeta(mutated, timestampMs: timestampMs)
+                meta["screenshot"] = "\(lastDir)/screenshot.jpg"
+                meta["annotated_screenshot"] = "\(lastDir)/annotated.jpg"
+                _ = StepFolderWriter.updateStepMeta(
+                    recordingDir: dir,
+                    stepDirRelative: lastDir,
+                    meta: meta
+                )
+                let entry = LearningDispatch.serializeIndexEntry(
+                    mutated,
+                    stepIndex: parseLeadingIndex(stepDirRel: lastDir),
+                    stepDirRelative: lastDir,
+                    timestampMs: timestampMs,
+                    source: "native"
+                )
+                EventsJSONLWriter.append(to: dir, entry: entry)
+            }
         }
 
         os_unfair_lock_unlock(&lock)

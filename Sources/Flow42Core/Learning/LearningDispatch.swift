@@ -76,6 +76,108 @@ public enum LearningDispatch {
 
     // MARK: - Serialization
 
+    /// The action_type slug (`click`, `typeText`, `keyPress`, …) used both
+    /// as a meta.yaml field and as the suffix in the v2 step folder name
+    /// (`steps/0007-typeText/`). Pure mapping over the enum, no AX or app
+    /// context needed.
+    public nonisolated static func actionTypeSlug(_ action: ObservedActionType) -> String {
+        switch action {
+        case .click:        return "click"
+        case .typeText:     return "typeText"
+        case .keyPress:     return "keyPress"
+        case .hotkey:       return "hotkey"
+        case .appSwitch:    return "appSwitch"
+        case .scroll:       return "scroll"
+        case .secureField:  return "secureField"
+        case .narration:    return "narration"
+        case .urlChange:    return "urlChange"
+        case .newTab:       return "newTab"
+        case .tabSwitch:    return "tabSwitch"
+        }
+    }
+
+    /// One-line human-readable summary for the events.jsonl `summary` field.
+    /// Same vocabulary the menu timeline + the agent's Pass 1 parse, so we
+    /// avoid duplicating per-action-type prose between writer and reader.
+    public nonisolated static func oneLineSummary(_ action: ObservedAction) -> String {
+        switch action.action {
+        case .click(let x, let y, let button, let count):
+            let verb = count >= 2 ? "double-click" : "\(button) click"
+            if let name = action.elementContext?.computedName,
+               !name.isEmpty {
+                return "\(verb) '\(name)'"
+            }
+            return "\(verb) @ (\(Int(x)), \(Int(y)))"
+        case .typeText(let text):
+            return "type \"\(truncate(text, max: 60))\""
+        case .keyPress(_, let keyName, let mods):
+            return mods.isEmpty
+                ? "press \(keyName)"
+                : "press \(mods.joined(separator: "+"))+\(keyName)"
+        case .hotkey(let mods, let keyName):
+            return "hotkey \(mods.joined(separator: "+"))+\(keyName)"
+        case .appSwitch(let toApp, _):
+            return "switch to \(toApp)"
+        case .scroll(let dx, let dy, _, _):
+            return "scroll dx=\(dx) dy=\(dy)"
+        case .secureField:
+            return "secure field input"
+        case .narration(let text):
+            return "narration: \(truncate(text, max: 80))"
+        case .urlChange(let url):
+            return "navigate → \(truncate(url, max: 60))"
+        case .newTab(let url):
+            return "new tab → \(truncate(url, max: 60))"
+        case .tabSwitch(_, let title):
+            return "switch tab → \(truncate(title, max: 60))"
+        }
+    }
+
+    /// Full per-step dict for `meta.yaml`. This is the rich detail the
+    /// structuring agent reads in Pass 2 (denoise) / Pass 3 (find headless
+    /// alternatives). Same shape as the v1 flow.json action entry plus an
+    /// explicit `timestamp_ms` (callers compute it from session anchor +
+    /// action.timestamp).
+    public nonisolated static func serializeStepMeta(
+        _ action: ObservedAction,
+        timestampMs: Int64
+    ) -> [String: Any] {
+        var dict = serializeAction(action)
+        dict["timestamp_ms"] = timestampMs
+        return dict
+    }
+
+    /// Lightweight events.jsonl line. Just enough for the timeline to
+    /// render a row + the agent's Pass 1 to detect phases. Anything richer
+    /// belongs in meta.yaml; consumers walk into the step folder when
+    /// they need detail.
+    public nonisolated static func serializeIndexEntry(
+        _ action: ObservedAction,
+        stepIndex: Int,
+        stepDirRelative: String,
+        timestampMs: Int64,
+        source: String = "native"
+    ) -> [String: Any] {
+        var dict: [String: Any] = [
+            "idx": stepIndex,
+            "step_dir": stepDirRelative,
+            "action_type": actionTypeSlug(action.action),
+            "app": action.appName,
+            "summary": oneLineSummary(action),
+            "timestamp_ms": timestampMs,
+            "source": source,
+        ]
+        if let url = action.url, !url.isEmpty {
+            dict["url"] = url
+        }
+        return dict
+    }
+
+    private nonisolated static func truncate(_ s: String, max: Int) -> String {
+        if s.count <= max { return s }
+        return String(s.prefix(max)) + "…"
+    }
+
     public nonisolated static func serializeAction(_ action: ObservedAction) -> [String: Any] {
         var dict: [String: Any] = [
             "timestamp": action.timestamp,
