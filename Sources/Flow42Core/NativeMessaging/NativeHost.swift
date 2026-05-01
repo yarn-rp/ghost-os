@@ -38,10 +38,23 @@ public enum NativeHost {
                     "version": Flow42Core.version,
                 ])
             case "active-recording":
-                let payload: [String: Any] = [
+                var payload: [String: Any] = [
                     "type": "active-recording",
                     "recording": ActiveRecording.read() as Any? ?? NSNull(),
+                    // Hint the extension so it can short-circuit without
+                    // sending dom-events at all when native mode is active.
+                    "browser_mode": BrowserMode.current().rawValue,
                 ]
+                // One-shot highlight-mode trigger from the menu app's
+                // Cmd+Shift+A handler when Chrome is frontmost. Consume()
+                // checks + removes the marker atomically so the next poll
+                // doesn't re-trigger.
+                if HighlightRequest.consume() {
+                    payload["highlight_request"] = true
+                }
+                if HighlightExit.consume() {
+                    payload["highlight_exit"] = true
+                }
                 Framing.write(stdout, payload)
             case "dom-event":
                 handleDomEvent(frame)
@@ -58,9 +71,21 @@ public enum NativeHost {
 
     // MARK: - DOM event handler
 
+    private static var domScreenshotCounter = 0
+
     private static func handleDomEvent(_ frame: [String: Any]) {
         guard let recordingSlug = frame["recording"] as? String else { return }
-        guard let event = frame["event"] else { return }
+        guard var event = frame["event"] as? [String: Any] else { return }
+
+        // Native browser-mode: the user opted out of the extension entirely.
+        // Drop the frame BEFORE we touch the recording dir so dom-events.jsonl
+        // is never created. The extension should also stop sending these
+        // (we surface browser_mode in the active-recording reply), but this
+        // is the authoritative gate either way.
+        if BrowserMode.current() == .native {
+            log("dom-event dropped: BrowserMode=native, ignoring extension")
+            return
+        }
 
         // Resolve the recording dir from the active-recording marker. We
         // refuse to write to arbitrary slugs even if the extension asks —
@@ -74,6 +99,26 @@ public enum NativeHost {
             log("dom-event for inactive recording '\(recordingSlug)', dropping")
             return
         }
+
+        // If the extension included a JPEG, write it to disk and replace the
+        // base64 blob with a relative path. Keeps dom-events.jsonl small.
+        if let b64 = event["screenshot_jpeg_base64"] as? String,
+           let data = Data(base64Encoded: b64) {
+            domScreenshotCounter += 1
+            let filename = String(format: "dom-%03d.jpg", domScreenshotCounter)
+            let shotDir = (dir as NSString).appendingPathComponent("screenshots")
+            try? FileManager.default.createDirectory(
+                atPath: shotDir, withIntermediateDirectories: true
+            )
+            let shotPath = (shotDir as NSString).appendingPathComponent(filename)
+            do {
+                try data.write(to: URL(fileURLWithPath: shotPath))
+                event["screenshot"] = "screenshots/\(filename)"
+            } catch {
+                log("failed to write \(filename): \(error)")
+            }
+        }
+        event.removeValue(forKey: "screenshot_jpeg_base64")
 
         guard let line = try? JSONSerialization.data(
             withJSONObject: event,
@@ -93,8 +138,30 @@ public enum NativeHost {
     }
 
     private static func log(_ message: String) {
-        let line = "[flow42-host] \(message)\n"
-        FileHandle.standardError.write(Data(line.utf8))
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(timestamp)] [flow42-host pid=\(getpid())] \(message)\n"
+        let data = Data(line.utf8)
+        FileHandle.standardError.write(data)
+
+        // Chrome discards the host's stderr, so also append to a file the
+        // user (or this debugger) can tail. ~/.openclaw/flow42/native-host.log
+        // grows append-only across all native-host invocations.
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dir = home
+            .appendingPathComponent(".openclaw")
+            .appendingPathComponent("flow42")
+        try? FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true
+        )
+        let logPath = dir.appendingPathComponent("native-host.log").path
+        if !FileManager.default.fileExists(atPath: logPath) {
+            FileManager.default.createFile(atPath: logPath, contents: nil)
+        }
+        if let handle = FileHandle(forWritingAtPath: logPath) {
+            try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        }
     }
 }
 
@@ -111,13 +178,16 @@ public enum ActiveRecording {
     }
 
     /// Write the marker — called by `flow42 record` on start.
-    public static func set(slug: String, dir: String) throws {
+    /// `pid` is the recorder process id; `flow42 record stop` sends SIGTERM
+    /// to that pid to trigger a clean shutdown.
+    public static func set(slug: String, dir: String, pid: Int? = nil) throws {
         let url = markerURL()
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let body: [String: Any] = ["slug": slug, "dir": dir]
+        var body: [String: Any] = ["slug": slug, "dir": dir]
+        if let pid { body["pid"] = pid }
         let data = try JSONSerialization.data(
             withJSONObject: body,
             options: [.prettyPrinted]

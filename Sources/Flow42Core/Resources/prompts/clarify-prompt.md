@@ -1,5 +1,7 @@
 # Phase 1 — Understand the flow
 
+> **If you have access to the `flow-creator` skill, use that workflow instead — it supersedes this prompt.** This file is the no-skill-runtime fallback that gets seeded into every recording's `.agent/` directory.
+
 The user just recorded a flow for you to learn. The recording may be a native-app flow (macOS), a browser flow, or a mix — `platform` and per-step `app` / `bundle_id` fields tell you which. **Your goal in this phase is only to understand the flow well enough to replicate it later with your own tools.** Do not write any files yet — a second prompt will follow when the user is satisfied with your understanding.
 
 ## Inputs
@@ -12,10 +14,13 @@ The user message gave you the absolute path to the recording directory. Inside i
   screenshots/
     step-NNN.jpg                 # focused-window screenshot per action
     step-NNN.annotated.jpg       # same, with click marker (for clicks only)
+    dom-NNN.jpg                  # extension-captured screenshots for browser steps
   .agent/
     clarify-prompt.md            # this file
     generate-prompt.md           # phase-2 prompt
 ```
+
+**Narration events are your highest-priority signal.** When the user narrates while recording, each finalized utterance lands in the actions stream as `{ "action_type": "narration", "text": "...", "timestamp_ms": ... }` interleaved with clicks/typeText/scroll. Read those alongside the surrounding actions — the voiceover tells you *why* a step happened, what the parameters represent, and which steps are scaffolding vs essential. If no narration events are present, the user simply didn't speak; don't ask why.
 
 `flow.json` has rich per-step context: action type (click / typeText / hotkey / scroll / appSwitch), accessibility-tree element data (role, title, identifier; for browser steps also dom_id / dom_classes), the window title and URL, and the path to the matching screenshot.
 
