@@ -12,6 +12,10 @@ local/
 .claude-plugin/
 agents/
 skills/
+# …but DO track the bundled skills resources the recorder seeds into
+# every recording's .agent/ dir. These ship with flow42 itself.
+!Sources/Flow42Core/Resources/skills/
+!Sources/Flow42Core/Resources/skills/**
 
 # Release artifacts
 ghost-os-*.tar.gz
