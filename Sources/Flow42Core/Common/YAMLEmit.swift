@@ -96,6 +96,13 @@ public enum YAMLEmit {
         case let n as Int64:
             out += " \(n)\n"
 
+        case let n as UInt64:
+            // mach_absolute_time() returns UInt64. Without this case, the
+            // fallback below stringifies it ("8550169627638") which made
+            // the recorder's `timestamp` field look like a string instead
+            // of a number.
+            out += " \(n)\n"
+
         case let n as Double:
             out += " \(formatDouble(n))\n"
 

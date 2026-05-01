@@ -138,13 +138,39 @@ public enum LearningDispatch {
     /// alternatives). Same shape as the v1 flow.json action entry plus an
     /// explicit `timestamp_ms` (callers compute it from session anchor +
     /// action.timestamp).
+    ///
+    /// Differs from serializeAction in two ways: drops keys whose values
+    /// are NSNull or empty strings (so the meta.yaml doesn't carry
+    /// `url: null` / `window: null` lines for the common no-URL non-
+    /// browser click), and prunes empty fields off the inner `element`
+    /// dict (computed_name: "", title: "" — clutter the recorder doesn't
+    /// have evidence for).
     public nonisolated static func serializeStepMeta(
         _ action: ObservedAction,
         timestampMs: Int64
     ) -> [String: Any] {
         var dict = serializeAction(action)
         dict["timestamp_ms"] = timestampMs
-        return dict
+        return prune(dict)
+    }
+
+    /// Recursively drop keys whose values are NSNull or empty strings.
+    /// Inner dictionaries get pruned too (and dropped if they end up
+    /// empty); arrays are walked but element-level pruning is left to
+    /// the caller — we don't know enough about each item to prune blindly.
+    private nonisolated static func prune(_ dict: [String: Any]) -> [String: Any] {
+        var out: [String: Any] = [:]
+        for (k, v) in dict {
+            if v is NSNull { continue }
+            if let s = v as? String, s.isEmpty { continue }
+            if let nested = v as? [String: Any] {
+                let pruned = prune(nested)
+                if !pruned.isEmpty { out[k] = pruned }
+                continue
+            }
+            out[k] = v
+        }
+        return out
     }
 
     /// Lightweight events.jsonl line. Just enough for the timeline to
