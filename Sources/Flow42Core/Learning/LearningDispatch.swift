@@ -76,12 +76,16 @@ public enum LearningDispatch {
 
     // MARK: - Serialization
 
-    public static func serializeAction(_ action: ObservedAction) -> [String: Any] {
+    public nonisolated static func serializeAction(_ action: ObservedAction) -> [String: Any] {
         var dict: [String: Any] = [
             "timestamp": action.timestamp,
             "app": action.appName,
             "bundle_id": action.appBundleId,
         ]
+        if let built = ReplicateCommand.native(action) {
+            dict["replicate"] = built.shellString
+            dict["replicate_argv"] = built.argv
+        }
         dict["window"] = action.windowTitle ?? NSNull()
         dict["url"] = action.url ?? NSNull()
         dict["element"] = action.elementContext.map { serializeElement($0) } ?? NSNull()
@@ -112,12 +116,25 @@ public enum LearningDispatch {
             dict["x"] = x; dict["y"] = y
         case .secureField:
             dict["action_type"] = "secureField"
+        case .narration(let text):
+            dict["action_type"] = "narration"
+            dict["text"] = text
+        case .urlChange(let url):
+            dict["action_type"] = "urlChange"
+            dict["url"] = url
+        case .newTab(let url):
+            dict["action_type"] = "newTab"
+            dict["url"] = url
+        case .tabSwitch(let url, let title):
+            dict["action_type"] = "tabSwitch"
+            dict["url"] = url
+            dict["title"] = title
         }
 
         return dict
     }
 
-    private static func serializeElement(_ e: ElementContext) -> [String: Any] {
+    private nonisolated static func serializeElement(_ e: ElementContext) -> [String: Any] {
         var dict: [String: Any] = [:]
         if let v = e.role { dict["role"] = v }
         if let v = e.title { dict["title"] = v }
