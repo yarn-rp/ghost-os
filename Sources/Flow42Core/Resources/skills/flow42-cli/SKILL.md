@@ -156,20 +156,22 @@ flow42 record start [--description D]   # forks daemon, returns JSON immediately
 flow42 record status                     # is anything recording right now?
 flow42 record stop                       # signals daemon, blocks for finalise (~1-30s), prints final stats
 flow42 flows [--json]                    # list past recordings
+flow42 structure <flow-dir>              # prepare a recording for the agent's three-pass flow
+flow42 view <flow-dir> [--path KIND]     # render flow.yaml to markdown (or a runnable script)
 ```
 
-`start` returns a JSON line with `path`, `slug`, `pid`, and `stop_command`. `stop` blocks while whisper transcribes narration, then writes `flow.json` and prints the action count.
+`start` returns a JSON line with `path`, `slug`, `pid`, and `stop_command`. `stop` blocks while whisper transcribes narration, then closes out the v2 layout (`steps/`, `events.jsonl`) and prints the action count.
 
 **Interactive (human at a real terminal):**
 ```
 flow42 record [--description D]   # blocks the terminal; type `done` to stop
 ```
 
-In both modes: narration is captured via the mic and transcribed at stop-time; `flow.json` ends up with mic events interleaved with native + extension events by `timestamp_ms`. Recordings land in `~/.flow42/flows/<slug>/`.
+In both modes: narration is captured via the mic and transcribed at stop-time. Recordings land in `~/.flow42/flows/<slug>/` with the v2 layout (`steps/NNNN-action_type/{meta.yaml, screenshot.jpg, annotated.jpg}` per step plus a top-level `events.jsonl` index). A legacy `flow.json` is also tee'd alongside for the menu timeline; that goes away in Phase C. After recording, run `flow42 structure <flow-dir>` and let the agent (Claude Code or the future Flow app) author `flow.yaml` via the three-pass flow-creator skill.
 
 ## The `replicate` field
 
-Every action in `flow.json` carries:
+Every step's `meta.yaml` (under `steps/NNNN-action_type/`) carries:
 - `replicate`: a POSIX-shell-safe command string.
 - `replicate_argv`: an argv array that bypasses shell quoting entirely.
 

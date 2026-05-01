@@ -109,8 +109,10 @@ flow42 record stop
 ```
 
 This:
-- Tells the daemon to finalise (writes flow.json, transcribes narration,
-  merges native + extension + narration events into the action stream).
+- Tells the daemon to finalise (closes the step folders + events.jsonl,
+  transcribes narration, writes audio/narration.txt). Legacy flow.json
+  is also tee'd alongside for the menu timeline; that goes away in
+  Phase C.
 - Blocks for up to 60 seconds while transcription completes.
 - Returns a JSON line:
   ```json
@@ -130,13 +132,13 @@ to ask the user what to do next:
 > One moment…"
 
 Then load and run `flow-creator`. It will:
-- Read flow.json + narration + screenshots.
-- Strip likely-accidental events.
-- Detect phases.
-- **Now** propose parameters and prerequisites — informed by the actual
-  captured content, not guessed upfront.
-- Pick UI-replay vs shortcut per phase.
-- Write `SKILL.md` and `<skill-name>.md`.
+- Read events.jsonl (Pass 1, lightweight) to detect phase boundaries.
+- Walk step folders' meta.yaml (Pass 2) to assemble each phase's
+  faithful GUI path.
+- Propose coarse headless alternatives (Pass 3) — shell, osascript,
+  MCP, or CLI — that swap whole phases at once.
+- Write `flow.yaml` — the single source of truth. No SKILL.md / human
+  guide artifacts; markdown is rendered on demand by `flow42 view`.
 
 ## Hard rules
 
