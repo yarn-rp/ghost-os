@@ -7,6 +7,7 @@
 
 import AppKit
 import ApplicationServices
+import AVFoundation
 import AXorcist
 import Foundation
 import Flow42Core
@@ -30,6 +31,13 @@ struct Doctor {
         checkMCPConfig()
         checkRecipes()
         checkAXTree()
+        checkMicrophone()
+        checkWhisperCli()
+        checkWhisperModel()
+        checkBrowserDriver()
+        checkChromeNativeHostManifest()
+        checkSkillsInstalled()
+        checkChromeCDP()
         checkVisionBinary()
         checkPythonVersion()
         checkShowUIModel()
@@ -162,9 +170,9 @@ struct Doctor {
     // MARK: - Recipes
 
     private mutating func checkRecipes() {
-        let recipesDir = NSHomeDirectory() + "/.flow42/recipes"
+        let recipesDir = (Flow42Paths.root() as NSString).appendingPathComponent("recipes")
         if !FileManager.default.fileExists(atPath: recipesDir) {
-            print("  [FAIL] Recipes: directory missing (~/.openclaw/flow42/recipes/)")
+            print("  [FAIL] Recipes: directory missing (~/.flow42/recipes/)")
             print("    Fix: flow42 setup (installs bundled recipes)")
             issueCount += 1
             return
@@ -197,6 +205,218 @@ struct Doctor {
                 print("    - \(recipe.name): \(recipe.steps.count) steps")
             }
         }
+    }
+
+    // MARK: - Microphone (narration)
+
+    private mutating func checkMicrophone() {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        switch status {
+        case .authorized:
+            print("  [ok] Microphone: granted")
+        case .notDetermined:
+            print("  [warn] Microphone: not yet prompted")
+            print("    Run a recording once; the system will ask for permission.")
+            warningCount += 1
+        case .denied, .restricted:
+            print("  [FAIL] Microphone: denied")
+            print("    System Settings > Privacy & Security > Microphone — grant the parent terminal app, then restart it.")
+            issueCount += 1
+        @unknown default:
+            print("  [warn] Microphone: unknown status")
+            warningCount += 1
+        }
+    }
+
+    // MARK: - whisper-cli (narration transcription)
+
+    private mutating func checkWhisperCli() {
+        let candidates = [
+            "/opt/homebrew/bin/whisper-cli",
+            "/usr/local/bin/whisper-cli",
+        ]
+        if let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+            print("  [ok] whisper-cli: \(path)")
+            return
+        }
+        let result = runShell("command -v whisper-cli")
+        if result.exitCode == 0 && !result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            print("  [ok] whisper-cli: \(result.output.trimmingCharacters(in: .whitespacesAndNewlines))")
+            return
+        }
+        print("  [warn] whisper-cli: not installed")
+        print("    Narration transcription will be skipped at stop time.")
+        print("    Fix: brew install whisper-cpp")
+        warningCount += 1
+    }
+
+    private mutating func checkWhisperModel() {
+        let path = (Flow42Paths.modelsDir() as NSString)
+            .appendingPathComponent("ggml-base.en.bin")
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+           let size = attrs[.size] as? Int, size > 100_000_000 {
+            print("  [ok] Whisper model: \(formatBytes(size)) at \(path)")
+        } else if FileManager.default.fileExists(atPath: path) {
+            print("  [warn] Whisper model present but smaller than expected (\(path))")
+            warningCount += 1
+        } else {
+            print("  [info] Whisper model: not yet downloaded")
+            print("    First recording will auto-download (~142 MB) on stop.")
+        }
+    }
+
+    // MARK: - browser-driver
+
+    private mutating func checkBrowserDriver() {
+        // Walk up from the current binary to find the runtime/browser-driver dir,
+        // matching the same logic Act.swift uses at runtime.
+        let exe = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
+            .resolvingSymlinksInPath()
+        var dir = exe.deletingLastPathComponent()
+        var found: URL?
+        for _ in 0..<8 {
+            for parent in [dir.deletingLastPathComponent(), dir] {
+                let candidate = parent
+                    .appendingPathComponent("runtime")
+                    .appendingPathComponent("browser-driver")
+                if FileManager.default.fileExists(atPath: candidate.appendingPathComponent("run.mjs").path) {
+                    found = candidate
+                    break
+                }
+            }
+            if found != nil { break }
+            dir = dir.deletingLastPathComponent()
+        }
+        if let env = ProcessInfo.processInfo.environment["FLOW42_BROWSER_DRIVER"] {
+            let candidate = URL(fileURLWithPath: env).deletingLastPathComponent()
+            if FileManager.default.fileExists(atPath: env) {
+                found = candidate
+            }
+        }
+        guard let found else {
+            print("  [FAIL] Browser driver: run.mjs not found")
+            print("    Set FLOW42_BROWSER_DRIVER to the path of run.mjs, or build from the project tree.")
+            issueCount += 1
+            return
+        }
+        print("  [ok] Browser driver: \(found.appendingPathComponent("run.mjs").path)")
+        let nodeModules = found.appendingPathComponent("node_modules").appendingPathComponent("playwright-core")
+        if FileManager.default.fileExists(atPath: nodeModules.path) {
+            print("  [ok] Browser driver deps installed")
+        } else {
+            print("  [FAIL] Browser driver deps missing")
+            print("    Fix: cd \(found.path) && npm install")
+            issueCount += 1
+        }
+    }
+
+    // MARK: - Chrome native-messaging manifest
+
+    private mutating func checkChromeNativeHostManifest() {
+        // The Chrome extension stack is OPTIONAL — recordings work via
+        // native AX even without it. We surface info-level statuses for
+        // missing/stale state, not warnings, unless the manifest points
+        // at a binary that no longer exists (which IS a real bug).
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library")
+            .appendingPathComponent("Application Support")
+            .appendingPathComponent("Google")
+            .appendingPathComponent("Chrome")
+            .appendingPathComponent("NativeMessagingHosts")
+            .appendingPathComponent("com.web42.flow42.json")
+            .path
+
+        guard FileManager.default.fileExists(atPath: path),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            print("  [info] Chrome host manifest: not registered (extension is optional)")
+            print("    To enable the DOM sidecar: flow42 setup-browser")
+            return
+        }
+
+        let manifestPath = (json["path"] as? String) ?? ""
+        let currentBinary = ProcessInfo.processInfo.arguments[0]
+        let realCurrent = (try? URL(fileURLWithPath: currentBinary).resolvingSymlinksInPath().path) ?? currentBinary
+
+        if manifestPath == realCurrent || manifestPath == currentBinary {
+            print("  [ok] Chrome host manifest: registered → \(manifestPath)")
+        } else if FileManager.default.isExecutableFile(atPath: manifestPath) {
+            print("  [info] Chrome host manifest points at a different flow42 binary")
+            print("    Manifest: \(manifestPath)")
+            print("    Current:  \(realCurrent)")
+            print("    Re-register with: flow42 setup-browser")
+        } else {
+            print("  [warn] Chrome host manifest points at a missing binary: \(manifestPath)")
+            print("    Re-register with: flow42 setup-browser")
+            warningCount += 1
+        }
+    }
+
+    // MARK: - Skills
+
+    private mutating func checkSkillsInstalled() {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude")
+            .appendingPathComponent("skills")
+        var present: [String] = []
+        var missing: [String] = []
+        for name in ["flow42-cli", "flow-creator"] {
+            let skillFile = dir.appendingPathComponent(name).appendingPathComponent("SKILL.md").path
+            if FileManager.default.fileExists(atPath: skillFile) {
+                present.append(name)
+            } else {
+                missing.append(name)
+            }
+        }
+        if missing.isEmpty {
+            print("  [ok] Skills installed: \(present.joined(separator: ", "))")
+        } else {
+            print("  [warn] Skills not installed: \(missing.joined(separator: ", "))")
+            print("    Fix: flow42 install-skills --update")
+            warningCount += 1
+        }
+    }
+
+    // MARK: - Chrome CDP (runtime)
+
+    private mutating func checkChromeCDP() {
+        // The CDP endpoint is OPTIONAL — `flow42 act --target browser`
+        // needs it, but recording and native-target actions don't. We
+        // never block on its absence; we just report whether it's up.
+        let curl = runShell(#"curl -s --max-time 2 http://127.0.0.1:9222/json/version"#)
+        if curl.exitCode == 0 && curl.output.contains("Browser") {
+            print("  [ok] Chrome debug endpoint: reachable on :9222")
+            return
+        }
+
+        // Distinguish the sub-cases so the suggested fix is precise.
+        let psFlag = runShell(#"ps aux | grep -E 'Google Chrome.app/.+--remote-debugging-port=9222' | grep -v grep | grep -v Helper | head -1"#)
+        let psAny  = runShell(#"ps aux | grep 'Google Chrome.app/Contents/MacOS/Google Chrome' | grep -v grep | head -1"#)
+        let chromeRunningWithFlag = !psFlag.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let chromeRunningAtAll    = !psAny.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        if chromeRunningWithFlag {
+            print("  [info] Chrome debug endpoint: process has the flag but isn't binding the port")
+            print("    Chrome 136+ silently disables CDP for the default profile.")
+            print("    To enable the browser-target driver, run:")
+            print("      flow42 setup-browser   # quits Chrome, relaunches on the flow42 profile")
+        } else if chromeRunningAtAll {
+            print("  [info] Chrome debug endpoint: not reachable")
+            print("    Chrome is running but without the debug endpoint.")
+            print("    To enable the browser-target driver: flow42 setup-browser")
+        } else {
+            print("  [info] Chrome debug endpoint: not reachable (Chrome not running)")
+            print("    Optional — only needed for `flow42 act --target browser`.")
+            print("    To enable: flow42 setup-browser")
+        }
+    }
+
+    private func formatBytes(_ n: Int) -> String {
+        if n >= 1_000_000_000 { return String(format: "%.1f GB", Double(n) / 1e9) }
+        if n >= 1_000_000     { return String(format: "%.0f MB", Double(n) / 1e6) }
+        if n >= 1_000         { return String(format: "%.0f KB", Double(n) / 1e3) }
+        return "\(n) B"
     }
 
     // MARK: - AX Tree
@@ -259,7 +479,7 @@ struct Doctor {
             if FileManager.default.isExecutableFile(atPath: venvPython) {
                 let result = runShell("\(venvPython) -c 'import mlx_vlm; print(\"ok\")' 2>/dev/null")
                 if result.exitCode == 0 && result.output.contains("ok") {
-                    print("  [ok] Vision Python: ~/.openclaw/flow42/venv/ (mlx_vlm available)")
+                    print("  [ok] Vision Python: ~/.flow42/venv/ (mlx_vlm available)")
                     found = true
                 }
             }
@@ -299,7 +519,7 @@ struct Doctor {
             if major < 3 || (major == 3 && minor < 10) {
                 print("  [!] Python version: \(version) (below minimum 3.10)")
                 print("    MLX requires Python 3.10+.")
-                print("    Fix: brew install python@3.12 && rm -rf ~/.openclaw/flow42/venv && flow42 setup")
+                print("    Fix: brew install python@3.12 && rm -rf ~/.flow42/venv && flow42 setup")
                 warningCount += 1
             } else {
                 print("  [ok] Python version: \(version)")
@@ -322,7 +542,7 @@ struct Doctor {
                let tMinor = Int(tParts[1]) {
                 if tMajor > 4 || (tMajor == 4 && tMinor >= 49) {
                     print("  [FAIL] transformers: \(tVer) (>=4.49 requires PyTorch for Qwen2VL)")
-                    print("    Fix: rm -rf ~/.openclaw/flow42/venv && flow42 setup")
+                    print("    Fix: rm -rf ~/.flow42/venv && flow42 setup")
                     issueCount += 1
                 } else {
                     print("  [ok] transformers: \(tVer)")
@@ -398,7 +618,7 @@ struct Doctor {
                 print("  [!] ShowUI-2B model: not found")
                 print("    Checked:")
                 print("      /opt/homebrew/share/flow42/models/ShowUI-2B/")
-                print("      ~/.openclaw/flow42/models/ShowUI-2B/")
+                print("      ~/.flow42/models/ShowUI-2B/")
                 print("      ~/.shadow/models/llm/ShowUI-2B-bf16-8bit/")
                 print("    Fix: flow42 setup (downloads the model)")
                 warningCount += 1

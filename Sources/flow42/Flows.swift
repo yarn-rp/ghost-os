@@ -1,10 +1,11 @@
 // Flows.swift - `flow42 flows` CLI subcommand
 //
-// Walks ~/.openclaw/flow42/recipes/ and reports each recording's slug,
+// Walks ~/.flow42/flows/ and reports each recording's slug,
 // last-modified time, action count (from flow.json if it exists), and
 // which artifacts have been generated. Prints a human table by default
 // or strict JSON with `--json`.
 
+import Flow42Core
 import Foundation
 
 enum Flows {
@@ -140,11 +141,7 @@ enum Flows {
     // MARK: - Helpers
 
     private static func recipesRoot() -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent(".openclaw")
-            .appendingPathComponent("flow42")
-            .appendingPathComponent("recipes")
+        URL(fileURLWithPath: Flow42Paths.flowsRoot())
     }
 
     private static let dateFmt: DateFormatter = {

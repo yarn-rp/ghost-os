@@ -23,6 +23,20 @@ public enum Actions {
 
     /// Click an element. AX-native first via AXorcist's PerformAction command,
     /// synthetic fallback with position-based click.
+    ///
+    /// `expectedRole`, `expectedName`, `expectedDomId` describe the AX element
+    /// that was under the click point at recording time. When provided with a
+    /// coordinate (x, y), we hit-test the same coordinate at replay time and
+    /// compare; if the role + name don't match, we treat the recorded coord
+    /// as stale (window moved, layout shifted) and try AX-by-identifier first
+    /// before falling through to the raw click. This is the dedicated
+    /// pre-click validation tier the plan introduces between AX-by-element
+    /// and the bare coordinate fallback.
+    ///
+    /// `runStepDir` is the absolute path of a directory the executor owns
+    /// for the current replay step. When non-nil we capture before/annotated
+    /// screenshots into it so the UI can show the user what state the agent
+    /// saw and where it clicked.
     public static func click(
         query: String?,
         role: String?,
@@ -31,7 +45,11 @@ public enum Actions {
         x: Double?,
         y: Double?,
         button: String?,
-        count: Int?
+        count: Int?,
+        expectedRole: String? = nil,
+        expectedName: String? = nil,
+        expectedDomId: String? = nil,
+        runStepDir: String? = nil
     ) -> ToolResult {
         let mouseButton: MouseButton = switch button {
         case "right": .right
@@ -40,8 +58,77 @@ public enum Actions {
         }
         let clickCount = max(1, count ?? 1)
 
-        // Coordinate-based click (no element lookup)
+        // Coordinate-based click (no element lookup) — with optional pre-click
+        // validation when the caller has handed us the recorded element
+        // context. The validation tier sits between "find by AX query" and
+        // "click pixel coordinate blind"; it catches the common "window
+        // moved between record and replay" case before we fire a click into
+        // empty space.
         if let x, let y {
+            // Pre-click screenshot (run-step-dir mode) — captured BEFORE the
+            // action so the UI can show what the agent saw.
+            var preScreenshot: String?
+            if let dir = runStepDir {
+                preScreenshot = LearningScreenshot.captureForReplay(
+                    stepDir: dir, annotated: false
+                )
+                _ = LearningScreenshot.captureForReplay(
+                    stepDir: dir, annotated: true,
+                    clickPoint: CGPoint(x: x, y: y)
+                )
+            }
+
+            // If we have a recorded element fingerprint, try to validate the
+            // current AX target before clicking. On mismatch we fall through
+            // to AX-by-identifier (if we have one), then ultimately to the
+            // raw coordinate click — but with a structured warning logged so
+            // the failure is visible.
+            let validation = validateRecordedTarget(
+                at: CGPoint(x: x, y: y),
+                expectedRole: expectedRole,
+                expectedName: expectedName,
+                expectedDomId: expectedDomId
+            )
+
+            if case .mismatch(let reason) = validation {
+                Log.warn("Pre-click validation: \(reason). Trying AX-by-identifier before raw click.")
+                if let recovered = tryAXByIdentifier(
+                    expectedRole: expectedRole,
+                    expectedName: expectedName,
+                    expectedDomId: expectedDomId,
+                    appName: appName,
+                    button: mouseButton,
+                    count: clickCount
+                ) {
+                    // Recovery path: we found the element by structured
+                    // identifier and clicked it. Useful but NOT perfect —
+                    // the recording's coordinates have drifted, which the
+                    // play loop deserves to know about so it can decide
+                    // whether to trust the result. Pick the recovery
+                    // sub-path based on what we matched on.
+                    let via: ActionGrounding.RecoveryPath =
+                        (expectedDomId?.isEmpty == false) ? .axIdentifier : .axName
+                    var data = recovered.data ?? [:]
+                    data["method"] = "ax-recovered-after-validation"
+                    data["validation_reason"] = reason
+                    if let preScreenshot { data["screenshot"] = preScreenshot }
+                    // Carry the recorded vs observed fingerprint for the
+                    // play loop / chat surface to render in the stuck
+                    // state if `expect:` ends up failing too.
+                    data["evidence"] = [
+                        "recorded_role": expectedRole ?? "",
+                        "recorded_name": expectedName ?? "",
+                        "recorded_dom_id": expectedDomId ?? "",
+                    ]
+                    return ToolResult(
+                        success: recovered.success,
+                        data: data,
+                        error: recovered.error,
+                        grounding: recovered.success ? .recovered(via: via) : nil
+                    )
+                }
+            }
+
             if let appName {
                 _ = FocusManager.focus(appName: appName)
                 Thread.sleep(forTimeInterval: 0.2)
@@ -49,12 +136,57 @@ public enum Actions {
             do {
                 try InputDriver.click(at: CGPoint(x: x, y: y), button: mouseButton, count: clickCount)
                 Thread.sleep(forTimeInterval: 0.15)
+                var data: [String: Any] = ["method": "coordinate", "x": x, "y": y]
+                let grounding: ActionGrounding
+                switch validation {
+                case .matched:
+                    data["validated"] = true
+                    grounding = .matched
+                case .mismatch(let reason):
+                    data["validated"] = false
+                    data["validation_reason"] = reason
+                    data["evidence"] = [
+                        "recorded_role": expectedRole ?? "",
+                        "recorded_name": expectedName ?? "",
+                        "recorded_dom_id": expectedDomId ?? "",
+                    ]
+                    grounding = .coordinatesOnly
+                case .skipped:
+                    // Recording lacked an AX fingerprint to validate
+                    // against. We can't claim verification — strict mode
+                    // must surface this as unverified rather than silent
+                    // success.
+                    grounding = .unverified
+                }
+                if let preScreenshot { data["screenshot"] = preScreenshot }
+                // Click physically fired. Whether the CLI shell exits
+                // non-zero is up to Do.swift's strict-mode policy reading
+                // `grounding`. The action layer reports the truth and
+                // lets the shell decide.
+                let success: Bool = {
+                    switch grounding {
+                    case .matched, .unverified: return true
+                    case .coordinatesOnly, .recovered: return false
+                    }
+                }()
+                let errorMessage: String? = {
+                    if case .coordinatesOnly = grounding {
+                        return "click fired at recorded (\(Int(x)), \(Int(y))) but pre-flight validation failed: \(data["validation_reason"] as? String ?? "unknown")"
+                    }
+                    return nil
+                }()
                 return ToolResult(
-                    success: true,
-                    data: ["method": "coordinate", "x": x, "y": y]
+                    success: success,
+                    data: data,
+                    error: errorMessage,
+                    grounding: grounding
                 )
             } catch {
-                return ToolResult(success: false, error: "Click at (\(Int(x)), \(Int(y))) failed: \(error)")
+                return ToolResult(
+                    success: false,
+                    error: "Click at (\(Int(x)), \(Int(y))) failed: \(error)",
+                    grounding: .coordinatesOnly
+                )
             }
         }
 
@@ -87,12 +219,15 @@ public enum Actions {
             case .success:
                 usleep(300_000) // 300ms for background app to react (v1's timing)
                 Log.info("AX-native press succeeded for '\(query ?? domId ?? "")'")
+                // AX-native targets the element by identifier — strongest
+                // possible grounding. No coordinates were trusted.
                 return ToolResult(
                     success: true,
                     data: [
                         "method": "ax-native",
                         "element": query ?? domId ?? "",
-                    ]
+                    ],
+                    grounding: .matched
                 )
             case let .error(message, code, _):
                 // Log the actual error so we know WHY AX-native failed
@@ -147,6 +282,10 @@ public enum Actions {
                     )
                     Thread.sleep(forTimeInterval: 0.15)
                     Log.info("CDP click: '\(query)' at (\(Int(screenCoords.x)), \(Int(screenCoords.y)))")
+                    // CDP-grounded: we asked Chrome for the element's
+                    // coords. Closer to "matched" than to coordinatesOnly,
+                    // but not the recorded path — flag as recovered so
+                    // strict callers know we substituted.
                     return ToolResult(
                         success: true,
                         data: [
@@ -155,7 +294,8 @@ public enum Actions {
                             "x": screenCoords.x,
                             "y": screenCoords.y,
                             "match_type": firstMatch["matchType"] as? String ?? "unknown",
-                        ]
+                        ],
+                        grounding: .recovered(via: .cdp)
                     )
                 } catch {
                     Log.warn("CDP click failed: \(error)")
@@ -195,12 +335,14 @@ public enum Actions {
                             "y": vy,
                             "confidence": visionResult.data?["confidence"] as? Double ?? 0,
                             "inference_ms": visionResult.data?["inference_ms"] as? Int ?? 0,
-                        ]
+                        ],
+                        grounding: .recovered(via: .vision)
                     )
                 } catch {
                     return ToolResult(
                         success: false,
-                        error: "VLM-grounded click at (\(Int(vx)), \(Int(vy))) failed: \(error)"
+                        error: "VLM-grounded click at (\(Int(vx)), \(Int(vy))) failed: \(error)",
+                        grounding: .coordinatesOnly
                     )
                 }
             }
@@ -232,19 +374,157 @@ public enum Actions {
         do {
             try element.click(button: mouseButton, clickCount: clickCount)
             Thread.sleep(forTimeInterval: 0.15)
+            // Synthetic click but the element was found by AX — same
+            // confidence as ax-native (we know the identifier hit).
             return ToolResult(
                 success: true,
                 data: [
                     "method": "synthetic",
                     "element": element.computedName() ?? query ?? "",
-                ]
+                ],
+                grounding: .matched
             )
         } catch {
             return ToolResult(
                 success: false,
                 error: "Click failed: \(error)",
-                suggestion: "Try flow42_inspect on the element, or use x/y coordinates"
+                suggestion: "Try flow42_inspect on the element, or use x/y coordinates",
+                grounding: .coordinatesOnly
             )
+        }
+    }
+
+    // MARK: - Pre-click validation
+
+    /// Outcome of comparing the AX element under a recorded coordinate at
+    /// replay time against the element captured at recording time.
+    enum TargetValidation {
+        /// No expected fingerprint provided — caller skipped validation.
+        case skipped
+        /// AX hit-test returned an element whose role + name agree with the
+        /// recorded fingerprint within tolerance.
+        case matched
+        /// AX hit-test returned something else (or nothing). The caller
+        /// should escalate before firing the raw click.
+        case mismatch(reason: String)
+    }
+
+    /// Hit-test the current AX tree at `point` and compare the element under
+    /// it to the recorded fingerprint. Light-touch: we only fail loudly on
+    /// role mismatch or both names being non-empty and divergent. Empty
+    /// fingerprints (recording missed the AX context) skip validation.
+    private static func validateRecordedTarget(
+        at point: CGPoint,
+        expectedRole: String?,
+        expectedName: String?,
+        expectedDomId: String?
+    ) -> TargetValidation {
+        // Skip when no fingerprint was recorded.
+        if (expectedRole?.isEmpty ?? true)
+            && (expectedName?.isEmpty ?? true)
+            && (expectedDomId?.isEmpty ?? true) {
+            return .skipped
+        }
+
+        let sys = AXUIElementCreateSystemWide()
+        var hit: AXUIElement?
+        let err = AXUIElementCopyElementAtPosition(sys, Float(point.x), Float(point.y), &hit)
+        guard err == .success, let el = hit else {
+            return .mismatch(reason: "no AX element under (\(Int(point.x)), \(Int(point.y))) at replay time")
+        }
+
+        let actualRole: String? = {
+            var v: CFTypeRef?
+            let r = AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &v)
+            return (r == .success) ? v as? String : nil
+        }()
+        let actualDomId: String? = {
+            var v: CFTypeRef?
+            let r = AXUIElementCopyAttributeValue(el, "AXDOMIdentifier" as CFString, &v)
+            return (r == .success) ? v as? String : nil
+        }()
+        let actualTitle: String? = {
+            var v: CFTypeRef?
+            let r = AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &v)
+            return (r == .success) ? v as? String : nil
+        }()
+        let actualDesc: String? = {
+            var v: CFTypeRef?
+            let r = AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &v)
+            return (r == .success) ? v as? String : nil
+        }()
+        let actualName = actualTitle?.isEmpty == false ? actualTitle : actualDesc
+
+        // DOM ID is the strongest fingerprint when both sides have one.
+        if let want = expectedDomId, !want.isEmpty,
+           let got = actualDomId, !got.isEmpty,
+           want != got {
+            return .mismatch(reason: "DOM id mismatch: expected '\(want)', got '\(got)'")
+        }
+
+        // Role is required to match when we have one on each side.
+        if let want = expectedRole, !want.isEmpty,
+           let got = actualRole, !got.isEmpty,
+           want != got {
+            return .mismatch(reason: "role mismatch: expected '\(want)', got '\(got)'")
+        }
+
+        // Name comparison is best-effort: lots of recorded actions have a
+        // useful name on one side and not the other. Only flag when both
+        // sides are non-empty and clearly different.
+        if let want = expectedName, !want.isEmpty,
+           let got = actualName, !got.isEmpty {
+            let w = want.lowercased()
+            let g = got.lowercased()
+            if !w.contains(g) && !g.contains(w) {
+                return .mismatch(reason: "name mismatch: expected '\(want)', got '\(got)'")
+            }
+        }
+
+        return .matched
+    }
+
+    /// When pre-click validation fails, try one more recovery path: search
+    /// the AX tree by the recorded identifier / DOM id and click that
+    /// element. Returns nil if nothing matched, so the caller can fall back
+    /// to the raw coordinate click.
+    private static func tryAXByIdentifier(
+        expectedRole: String?,
+        expectedName: String?,
+        expectedDomId: String?,
+        appName: String?,
+        button: MouseButton,
+        count: Int
+    ) -> ToolResult? {
+        // Build a locator from whatever fingerprint we have. DOM id wins,
+        // then computed name.
+        let locator: Locator
+        if let domId = expectedDomId, !domId.isEmpty {
+            locator = LocatorBuilder.build(domId: domId)
+        } else if let name = expectedName, !name.isEmpty {
+            locator = LocatorBuilder.build(query: name, role: expectedRole, domId: nil)
+        } else {
+            return nil
+        }
+        guard let element = findElement(locator: locator, appName: appName) else {
+            return nil
+        }
+        if !element.isActionable() { return nil }
+        if let appName {
+            _ = FocusManager.focus(appName: appName)
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        do {
+            try element.click(button: button, clickCount: count)
+            Thread.sleep(forTimeInterval: 0.15)
+            return ToolResult(
+                success: true,
+                data: [
+                    "element": element.computedName() ?? expectedName ?? expectedDomId ?? "",
+                ]
+            )
+        } catch {
+            return nil
         }
     }
 
