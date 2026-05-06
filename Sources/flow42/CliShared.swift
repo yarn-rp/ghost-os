@@ -12,6 +12,15 @@ struct CliFlags {
     let map: [String: String]
     let bools: Set<String>
 
+    /// Empty-flag instance for code paths that emit a result outside the
+    /// normal `flow42 do <verb>` parsing flow (e.g. internal failures
+    /// from the gate). Strict-mode policy will then apply with no
+    /// opt-outs, which is what we want.
+    init(map: [String: String] = [:], bools: Set<String> = []) {
+        self.map = map
+        self.bools = bools
+    }
+
     func string(_ name: String) -> String? { map[name] }
     func int(_ name: String) -> Int? { map[name].flatMap(Int.init) }
     func double(_ name: String) -> Double? { map[name].flatMap(Double.init) }

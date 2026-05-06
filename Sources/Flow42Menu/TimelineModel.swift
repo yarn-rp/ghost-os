@@ -82,8 +82,7 @@ final class TimelineModel: ObservableObject {
         if fileFD >= 0 { close(fileFD); fileFD = -1 }
         if dirFD >= 0 { close(dirFD); dirFD = -1 }
 
-        guard state.mode == .recording,
-              let dir = state.recording?.dir else {
+        guard let dir = state.recording?.dir else {
             isLive = false
             sourcePath = nil
             recordingDir = nil

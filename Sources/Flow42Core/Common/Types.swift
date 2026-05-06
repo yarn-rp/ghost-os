@@ -12,6 +12,72 @@ public enum Flow42Core {
     public static let name = "flow42"
 }
 
+// MARK: - Action Grounding
+
+/// How confident is the action layer that the action did the right thing?
+///
+/// Every `flow42 do *` verb attaches one of these to its `ToolResult` so
+/// the CLI shell, the play loop, and the agent reading `do_result` events
+/// all share the same vocabulary. The hard rule: **only `.matched` counts
+/// as success in strict mode.** Everything else either fails hard at the
+/// CLI exit-code level (`.coordinatesOnly`, `.unverified` for verbs that
+/// couldn't even attempt verification) or is downgradeable to a warning
+/// when the caller explicitly opts in (`.recovered`, `--accept-recovery`).
+///
+/// The shape is closed: extending requires bumping consumers (Do.swift's
+/// emit, the play loop's expect evaluator, the UI confidence pill).
+public enum ActionGrounding: Sendable, Equatable {
+    /// Pre-action verification confirmed we operated on the recorded
+    /// element. The recorded fingerprint matched the AX/DOM target at
+    /// replay time. This is the only "perfect" tier.
+    case matched
+
+    /// The recorded coordinates didn't match, but a structured search
+    /// (AX identifier, AX name, CDP, vision) found the element and we
+    /// acted on it. Success-of-a-kind, but the recording is drifting —
+    /// the play loop pauses unless `expect:` proves the phase still
+    /// works, OR the caller explicitly passes `--accept-recovery`.
+    case recovered(via: RecoveryPath)
+
+    /// Every grounded path failed. We fired a raw input event at the
+    /// recorded coordinate without any way to confirm we hit what the
+    /// recording intended. **Always fails hard at the CLI exit level.**
+    /// The play loop interprets non-zero as "consult `expect:` before
+    /// advancing."
+    case coordinatesOnly
+
+    /// The verb's verifier didn't run (no fingerprint to compare
+    /// against, or verification isn't applicable to this verb yet).
+    /// Treated as failure in strict mode — the user wants explicit
+    /// proof, not silent assumptions.
+    case unverified
+
+    public enum RecoveryPath: String, Sendable {
+        case axIdentifier = "ax_identifier"
+        case axName = "ax_name"
+        case cdp
+        case vision
+    }
+
+    /// Stable string for JSON / log emission.
+    public var wireValue: String {
+        switch self {
+        case .matched: return "matched"
+        case .recovered(let via): return "recovered:\(via.rawValue)"
+        case .coordinatesOnly: return "coordinates_only"
+        case .unverified: return "unverified"
+        }
+    }
+
+    /// Whether this grounding tier counts as success under strict mode.
+    /// Only `.matched` does. Everything else is downgradeable but never
+    /// silently passes.
+    public var isStrictlyVerified: Bool {
+        if case .matched = self { return true }
+        return false
+    }
+}
+
 // MARK: - Tool Result
 
 /// Standard result wrapper returned by all MCP tools.
@@ -21,19 +87,26 @@ public struct ToolResult: Sendable {
     public let error: String?
     public let suggestion: String?
     public let context: ContextInfo?
+    /// Verification tier the action layer asserts (see `ActionGrounding`).
+    /// Optional because not every verb has a verifier *yet* — verbs that
+    /// haven't been audited under the strict-mode plan return nil and the
+    /// CLI shell treats the absence as `.unverified`.
+    public let grounding: ActionGrounding?
 
     public init(
         success: Bool,
         data: [String: Any]? = nil,
         error: String? = nil,
         suggestion: String? = nil,
-        context: ContextInfo? = nil
+        context: ContextInfo? = nil,
+        grounding: ActionGrounding? = nil
     ) {
         self.success = success
         self.data = data
         self.error = error
         self.suggestion = suggestion
         self.context = context
+        self.grounding = grounding
     }
 
     /// Convert to MCP-compatible dictionary for JSON serialization.
@@ -43,6 +116,7 @@ public struct ToolResult: Sendable {
         if let error { result["error"] = error }
         if let suggestion { result["suggestion"] = suggestion }
         if let context { result["context"] = context.toDict() }
+        if let grounding { result["grounding"] = grounding.wireValue }
         return result
     }
 }

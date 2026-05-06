@@ -64,6 +64,11 @@ public struct ObservedAction: Sendable {
     /// Same as `screenshotPath` but with an annotation (e.g. click marker).
     /// Nil when not yet computed.
     public let annotatedScreenshotPath: String?
+    /// CGDirectDisplayID of the display the click happened on. Single-display
+    /// setups always record the main display id. Multi-display setups can use
+    /// this to look up the right display origin at replay time so coordinates
+    /// are interpreted in the same global frame they were captured in.
+    public let displayId: UInt32
 
     public nonisolated init(
         timestamp: UInt64,
@@ -74,7 +79,8 @@ public struct ObservedAction: Sendable {
         url: String?,
         elementContext: ElementContext?,
         screenshotPath: String? = nil,
-        annotatedScreenshotPath: String? = nil
+        annotatedScreenshotPath: String? = nil,
+        displayId: UInt32 = 0
     ) {
         self.timestamp = timestamp
         self.action = action
@@ -85,6 +91,7 @@ public struct ObservedAction: Sendable {
         self.elementContext = elementContext
         self.screenshotPath = screenshotPath
         self.annotatedScreenshotPath = annotatedScreenshotPath
+        self.displayId = displayId
     }
 }
 

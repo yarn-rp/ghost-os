@@ -13,6 +13,7 @@
 //   * not on the Dock / not in Cmd-Tab — accessory app + non-activating panel
 
 import AppKit
+import Flow42Core
 import SwiftUI
 
 @MainActor
@@ -29,6 +30,12 @@ final class EdgeGlowWindow: NSPanel {
         self.backgroundColor = .clear
         self.hasShadow = false
         self.level = .statusBar
+        // Don't show up in recordings, screenshots, or window-list
+        // captures. The recorder uses CGWindowListCreateImage and
+        // honours `sharingType = .none` — same exclusion knob 1Password
+        // and other privacy-sensitive apps use. The user sees the glow
+        // on screen; the camera lens of the recorder doesn't.
+        self.sharingType = .none
         self.collectionBehavior = [
             .canJoinAllSpaces,
             .stationary,

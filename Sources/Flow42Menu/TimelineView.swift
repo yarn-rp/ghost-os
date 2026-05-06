@@ -17,6 +17,7 @@ struct TimelineView: View {
     @ObservedObject var stateClient: StateClient
     @ObservedObject var model: TimelineModel
     @ObservedObject var recordingsModel: RecordingsModel
+    @ObservedObject var panelController: PlayPanelController
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -35,17 +36,17 @@ struct TimelineView: View {
             Circle()
                 .fill(badgeColor)
                 .frame(width: 10, height: 10)
-            Text(stateClient.state.mode.rawValue.uppercased())
+            Text(stateClient.state.derivedState.rawValue.uppercased())
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
-            if let label = stateClient.state.label, !label.isEmpty {
+            if let label = stateClient.state.play?.label, !label.isEmpty {
                 Text("· \(label)")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
             Spacer()
-            if stateClient.state.mode == .recording {
+            if stateClient.state.derivedState == .recording {
                 Text("\(model.events.count) events")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(.secondary)
@@ -59,21 +60,54 @@ struct TimelineView: View {
 
     @ViewBuilder
     private var modeSurface: some View {
-        switch stateClient.state.mode {
+        switch stateClient.state.derivedState {
         case .idle:
             IdleSurface(recordings: recordingsModel)
-        case .recording:
-            RecordingSurface(state: stateClient.state, model: model)
-        case .autonomous:
-            AutonomousSurface(state: stateClient.state)
+        case .recording, .driving, .watching:
+            // For ANY non-idle state, the popover's content depends on
+            // whether the floating window is currently shown:
+            //   visible → small status header only (the floating window
+            //             carries the full UI)
+            //   hidden  → full panel content + an "Open Floating" button,
+            //             so the popover IS the active UI
+            if panelController.isFloatingVisible {
+                FloatingVisibleStatus(state: stateClient.state)
+            } else if let content = panelController.currentContent {
+                FloatingHiddenSurface(
+                    state: stateClient.state,
+                    content: content,
+                    timelineModel: panelController.timelineModel,
+                    chatSession: panelController.chatSession,
+                    onOpenFloating: { panelController.showFloating() },
+                    onStop: { runStopFromPopover() }
+                )
+            } else {
+                // No resolved content yet (rare race; first state tick).
+                FloatingVisibleStatus(state: stateClient.state)
+            }
         }
     }
 
+    /// Shell out `flow42 stop` from the popover's Stop button. The Stop
+    /// closure is wired through here rather than directly into the panel
+    /// view because we want a single source of truth for "how the menu
+    /// app's Swift code shells out to flow42."
+    private func runStopFromPopover() {
+        guard let path = Flow42CLI.binaryPath() else { return }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: path)
+        task.arguments = ["stop"]
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+        try? task.run()
+    }
+
     private var badgeColor: Color {
-        switch stateClient.state.mode {
+        switch stateClient.state.derivedState {
         case .idle: return .secondary
         case .recording: return Color(red: 0xFF/255, green: 0x3E/255, blue: 0xCB/255)
-        case .autonomous: return Color(red: 0xFF/255, green: 0x8A/255, blue: 0x3D/255)
+        case .driving:   return Color(red: 0xFF/255, green: 0x8A/255, blue: 0x3D/255)
+        case .watching:  return Color(red: 0x3D/255, green: 0xB6/255, blue: 0xFF/255)
         }
     }
 }
@@ -191,7 +225,10 @@ private struct IdleSurface: View {
     private func startRecording() {
         startError = nil
         starting = true
-        var args = ["record", "start"]
+        // Always force from the UI: the user pressing "Start recording"
+        // IS their "replace anything stale" intent. The CLI's strict
+        // singleton check is for human shells, not the menu.
+        var args = ["record", "start", "--force"]
         let trimmed = description.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
             args += ["--description", trimmed]
@@ -212,6 +249,121 @@ private struct IdleSurface: View {
                 startError = err
             }
         }
+    }
+}
+
+/// Locate the Flow42App binary so the menu can launch it on demand
+/// when the user clicks a recording. Mirrors `Flow42CLI.binaryPath`'s
+/// search order but targets the GUI binary instead of the CLI. Same
+/// rationale: bundle path first, then dev .build dir, then the running
+/// menu's siblings.
+private func flow42AppBinaryPath() -> String? {
+    let fm = FileManager.default
+
+    // 1. Inside Flow42.app bundle (Contents/MacOS/Flow42App).
+    if let exec = Bundle.main.bundlePath as String?,
+       (exec as NSString).pathExtension == "app" {
+        let cand = (exec as NSString).appendingPathComponent("Contents/MacOS/Flow42App")
+        if fm.isExecutableFile(atPath: cand) { return cand }
+    }
+    // 2. Walk up from the running menu binary to find a sibling .build.
+    let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+    var dir = exe.deletingLastPathComponent()
+    for _ in 0..<6 {
+        for variant in ["debug", "release"] {
+            let cand = dir
+                .appendingPathComponent(".build")
+                .appendingPathComponent(variant)
+                .appendingPathComponent("Flow42App")
+                .path
+            if fm.isExecutableFile(atPath: cand) { return cand }
+        }
+        let sibling = dir.appendingPathComponent("Flow42App").path
+        if fm.isExecutableFile(atPath: sibling) { return sibling }
+        dir = dir.deletingLastPathComponent()
+    }
+    return nil
+}
+
+/// If Flow42App is already running (process alive with our binary path),
+/// just bring it to front. Otherwise spawn it. After a brief delay the
+/// deep-link notification is reposted so the freshly-launched app picks
+/// it up after its delegate has subscribed.
+private func ensureFlow42AppRunningAndRepostDeepLink(dir: String) {
+    let runningApps = NSWorkspace.shared.runningApplications
+    let alreadyUp = runningApps.contains { app in
+        app.localizedName == "Flow42App" || app.bundleIdentifier?.contains("flow42") == true
+    }
+    if alreadyUp {
+        // Activate so the window comes forward; the in-process listener
+        // already received the notification we posted.
+        if let app = runningApps.first(where: {
+            $0.localizedName == "Flow42App"
+        }) {
+            app.activate()
+        }
+        return
+    }
+
+    guard let binary = flow42AppBinaryPath() else {
+        FileHandle.standardError.write(Data(
+            "[Flow42Menu] Flow42App binary not found; cannot deep-link.\n".utf8
+        ))
+        return
+    }
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: binary)
+    do {
+        try task.run()
+    } catch {
+        FileHandle.standardError.write(Data(
+            "[Flow42Menu] failed to launch Flow42App: \(error)\n".utf8
+        ))
+        return
+    }
+    // Re-post the deep link a moment later so the app has time to
+    // subscribe its DistributedNotificationCenter observer before the
+    // notification fires.
+    Task.detached {
+        try? await Task.sleep(nanoseconds: 1_500_000_000)  // 1.5s
+        Flow42DeepLink.postOpenFlow(dir: dir)
+    }
+}
+
+/// Sibling of `ensureFlow42AppRunningAndRepostDeepLink` for fresh
+/// recordings (no `flow.yaml` yet). Same launch + activate + re-post
+/// pattern, only the notification posted after the cold-start grace
+/// window changes.
+private func ensureFlow42AppRunningAndRepostRecording(dir: String, slug: String) {
+    let runningApps = NSWorkspace.shared.runningApplications
+    let alreadyUp = runningApps.contains { app in
+        app.localizedName == "Flow42App" || app.bundleIdentifier?.contains("flow42") == true
+    }
+    if alreadyUp {
+        if let app = runningApps.first(where: { $0.localizedName == "Flow42App" }) {
+            app.activate()
+        }
+        return
+    }
+    guard let binary = flow42AppBinaryPath() else {
+        FileHandle.standardError.write(Data(
+            "[Flow42Menu] Flow42App binary not found; cannot hand off recording.\n".utf8
+        ))
+        return
+    }
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: binary)
+    do {
+        try task.run()
+    } catch {
+        FileHandle.standardError.write(Data(
+            "[Flow42Menu] failed to launch Flow42App: \(error)\n".utf8
+        ))
+        return
+    }
+    Task.detached {
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        Flow42DeepLink.postOpenRecording(dir: dir, slug: slug)
     }
 }
 
@@ -249,7 +401,14 @@ private struct RecordingRow: View {
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
         .onTapGesture {
-            NSWorkspace.shared.open(URL(fileURLWithPath: recording.dir))
+            // Open the flow inside Flow42App rather than dumping the
+            // user into Finder. Strategy: post a distributed
+            // notification with the flow path; if the main app is
+            // running it'll catch it and navigate. If not, launch the
+            // app and re-post once it's up so the deep link still
+            // resolves on the same click.
+            Flow42DeepLink.postOpenFlow(dir: recording.dir)
+            ensureFlow42AppRunningAndRepostDeepLink(dir: recording.dir)
         }
         .contextMenu {
             Button("Reveal in Finder") {
@@ -355,7 +514,19 @@ private struct RecordingSurface: View {
             let result = await Flow42CLI.runAsync(["record", "stop"], timeout: 65)
             stopping = false
             if let result, (result["success"] as? Bool) == true {
-                // state.json watcher will swap us back to IdleSurface.
+                // state.json watcher swaps the menu surface back to
+                // IdleSurface. We additionally hand the freshly-
+                // captured recording off to Flow42App so an autonomous
+                // chat can run the flow-creator skill on it without
+                // any further user action.
+                if let dir = result["path"] as? String, !dir.isEmpty {
+                    let slug = (result["slug"] as? String) ?? ""
+                    Flow42DeepLink.postOpenRecording(dir: dir, slug: slug)
+                    // Bring the main app forward (or launch it cold
+                    // and re-post once it's up so the deep link
+                    // resolves on the same click).
+                    ensureFlow42AppRunningAndRepostRecording(dir: dir, slug: slug)
+                }
             } else {
                 stopError = (result?["error"] as? String) ?? "stop failed"
             }
@@ -403,40 +574,183 @@ private struct RecordingSurface: View {
     }
 }
 
-// MARK: - Autonomous surface (placeholder; deferred)
+// MARK: - Driving / watching surfaces (popover content for active plays)
+//
+// The popover renders one of two surfaces depending on whether the
+// floating window is currently shown:
+//
+//   FloatingVisibleStatus  — a small status header ONLY. The floating
+//                            window carries the full UI; the popover just
+//                            confirms what's happening so the user knows
+//                            why the menu bar icon changed colour.
+//
+//   FloatingHiddenSurface  — the full panel content + an "Open Floating"
+//                            button. With the floating window closed, the
+//                            popover is the only on-screen UI for the
+//                            session, so it has to be self-sufficient.
+//
+// Shared helpers for both surfaces (color tokens, header copy) live in
+// this private extension so we don't duplicate them.
 
-private struct AutonomousSurface: View {
+/// Tokens + copy shared between the surfaces. Handles all four derived
+/// states (recording, driving, watching, idle).
+private enum DrivingSurfaceTokens {
+    static let orange  = Color(red: 0xFF/255, green: 0x8A/255, blue: 0x3D/255)
+    static let blue    = Color(red: 0x3D/255, green: 0xB6/255, blue: 0xFF/255)
+    static let magenta = Color(red: 0xFF/255, green: 0x3E/255, blue: 0xCB/255)
+
+    static func accent(for state: AppState) -> Color {
+        if state.recording != nil { return magenta }
+        if state.play?.pause != nil { return blue }
+        if state.play?.state == .watching { return blue }
+        return orange
+    }
+
+    static func headerText(for state: AppState) -> String {
+        if state.recording != nil { return "Recording in progress" }
+        if state.play?.pause != nil { return "Paused — agent needs help" }
+        if state.play?.state == .watching { return "You're driving (agent is watching)" }
+        return "Agent is driving"
+    }
+
+    static func headerIcon(for state: AppState) -> String {
+        if state.recording != nil { return "record.circle.fill" }
+        if state.play?.pause != nil { return "exclamationmark.triangle.fill" }
+        if state.play?.state == .watching { return "eye.circle.fill" }
+        return "bolt.circle.fill"
+    }
+}
+
+// MARK: - Floating-visible status (small header only)
+
+/// Rendered in the popover when the floating window is on screen. Just a
+/// confirmation strip — the floating window has all the controls.
+private struct FloatingVisibleStatus: View {
     let state: AppState
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 14) {
             Spacer()
-            Image(systemName: "bolt.circle.fill")
-                .font(.system(size: 32, weight: .light))
-                .foregroundStyle(Color(red: 0xFF/255, green: 0x8A/255, blue: 0x3D/255))
-            Text("Agent is driving")
-                .font(.system(size: 13, weight: .medium))
-            if let label = state.autonomous?.label, !label.isEmpty {
-                Text(label)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 28)
+            HStack(spacing: 10) {
+                Image(systemName: DrivingSurfaceTokens.headerIcon(for: state))
+                    .font(.system(size: 28, weight: .light))
+                    .foregroundStyle(DrivingSurfaceTokens.accent(for: state))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(DrivingSurfaceTokens.headerText(for: state))
+                        .font(.system(size: 14, weight: .semibold))
+                    if let label = state.play?.label, !label.isEmpty {
+                        Text(label)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
             }
-            Text("Try not to touch the screen until the agent finishes.")
+            Spacer()
+            Text("The floating window has the full controls.")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
-            Spacer()
+                .padding(.bottom, 16)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Floating-hidden surface (full content; "Open Floating" + Stop)
+
+/// Rendered in the popover when the floating window has been dismissed.
+/// Renders the SAME panel view (PlayPanelView for plays, RecordingPanelView
+/// for recordings) the floating window uses, in `.popover` style (no
+/// glass, no shadow — the popover provides those).
+private struct FloatingHiddenSurface: View {
+    let state: AppState
+    let content: PlayPanelController.SessionContent
+    let timelineModel: TimelineModel
+    /// Same shared chat-session box PlayPanelController owns. The
+    /// popover's PlayPanelView reads it so the chat bubble + chat-
+    /// mode swap work here too — both surfaces stay perfectly in
+    /// sync.
+    @ObservedObject var chatSession: SessionClientBox
+    let onOpenFloating: () -> Void
+    let onStop: () -> Void
+
+    @ViewBuilder
+    var body: some View {
+        switch content {
+        case .play(let pc):
+            PlayPanelView(
+                state: state,
+                intent: pc.intent,
+                stepText: pc.stepText,
+                stepScreenshotPath: pc.stepScreenshotPath,
+                params: pc.params,
+                style: .popover,
+                onPause: { runFlow42(["play", "pause", "--reason", "user paused via menu bar popover"]) },
+                onResume: { runFlow42(["play", "resume"]) },
+                onResumeAndAdvance: {
+                    // Sequential — concurrent invocations race on
+                    // state.json's atomic writer.
+                    runFlow42Sequence([["play", "next"], ["play", "resume"]])
+                },
+                onNextStep: { runFlow42(["play", "next-step"]) },
+                onPrevStep: { runFlow42(["play", "prev-step"]) },
+                onPrimaryAction: onOpenFloating,
+                onStop: onStop,
+                chatSession: chatSession
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+        case .recording:
+            if let recording = state.recording {
+                RecordingPanelView(
+                    recording: recording,
+                    model: timelineModel,
+                    style: .popover,
+                    onPrimaryAction: onOpenFloating,
+                    onStop: onStop
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+        }
+    }
+
+    private func runFlow42(_ args: [String]) {
+        guard let path = Flow42CLI.binaryPath() else { return }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: path)
+        task.arguments = args
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+        try? task.run()
+    }
+
+    /// Run flow42 invocations sequentially off the main thread, waiting
+    /// for each to exit before starting the next. Required whenever the
+    /// second command depends on the first having committed to state.json
+    /// (concurrent writers race and one mutation gets clobbered).
+    private func runFlow42Sequence(_ commands: [[String]]) {
+        guard let path = Flow42CLI.binaryPath() else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            for args in commands {
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: path)
+                task.arguments = args
+                task.standardOutput = Pipe()
+                task.standardError = Pipe()
+                do {
+                    try task.run()
+                    task.waitUntilExit()
+                } catch {
+                    return
+                }
+            }
+        }
     }
 }
 
 // MARK: - Event row (shared by RecordingSurface)
 
-private struct EventRow: View {
+struct EventRow: View {
     let event: TimelineEvent
     let anchor: Int64?
     @State private var hovered = false
@@ -550,7 +864,7 @@ private struct EventRow: View {
 /// Lazily loads and renders a 48×32 thumbnail next to an event row.
 /// Lives inside a LazyVStack so the load only happens for visible rows.
 /// Failure (file gone, format weird) collapses the view silently.
-private struct EventThumbnail: View {
+struct EventThumbnail: View {
     let path: String
     @State private var image: NSImage? = nil
 

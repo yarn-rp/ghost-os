@@ -12,8 +12,14 @@ public enum SkillsResources {
     }
 
     /// Names of the skills shipped inside the binary.
-    /// Order is roughly the workflow order: reference first, recorder, then creator.
-    public static let bundledSkills = ["flow42-cli", "flow-recorder", "flow-creator"]
+    /// Order is roughly the workflow order: reference first, then the
+    /// three lifecycle skills (record → create → play).
+    public static let bundledSkills = [
+        "flow42-cli",
+        "flow-recorder",
+        "flow-creator",
+        "flow-player",
+    ]
 
     /// Resolve the bundled skill directory at `Resources/skills/<name>/`.
     /// Returns nil if the resource isn't available (build issue).

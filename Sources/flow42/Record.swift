@@ -4,8 +4,9 @@
 //
 //   flow42 record start [--description X]   — fork a daemon, return immediately.
 //   flow42 record stop                       — signal the active daemon, wait
-//                                              for flow.json to be produced,
-//                                              return its path.
+//                                              for meta.yaml to be produced
+//                                              (the canonical "finalized"
+//                                              marker), return its path.
 //   flow42 record status                     — report whether a recording is
 //                                              currently active.
 //   flow42 record [--description X]          — interactive (TTY) mode: stay in
@@ -29,6 +30,7 @@ import Darwin
 import Dispatch
 import Flow42Core
 import Foundation
+import Yams
 
 enum Record {
 
@@ -58,18 +60,15 @@ enum Record {
     // MARK: - start (background daemon)
 
     private static func runStart(args: [String]) {
-        // Refuse if another recording is already active.
-        if let active = ActiveRecording.read(),
-           let pid = active["pid"] as? Int,
-           kill(pid_t(pid), 0) == 0 {
-            emitJSON([
-                "success": false,
-                "error": "another recording is already active",
-                "active": active,
-                "suggestion": "run `flow42 record stop` first",
-            ])
-            exit(1)
-        }
+        // The recorder is a singleton: one recording exists at a time,
+        // ever. We enforce that by ALWAYS reconciling state before
+        // claiming a new daemon — kill any prior recorder (alive or
+        // zombie), wipe stale markers, clear lingering state.json
+        // entries — then proceed. There's no "refuse if active" gate;
+        // the user's request to start a new recording is the truth, and
+        // any prior owner gets evicted. `--force` is accepted as a
+        // no-op for back-compat with older callers.
+        forceCleanupBeforeStart()
 
         let description = parseFlag(args, "--description", "-d")
         let slug = makeSlug()
@@ -86,8 +85,6 @@ enum Record {
             ])
             exit(1)
         }
-        try? SeedPrompts.seed(into: dir)
-
         // Spawn a child `flow42 _daemon …` process. Parent waits for the
         // active marker to appear (proves the daemon actually started), then
         // prints + exits. The child re-runs flow42 with `_daemon` and goes
@@ -158,8 +155,69 @@ enum Record {
     }
 
     /// Hidden subcommand entry point — invoked by `runStart` via Process().
-    /// We're already a child of the spawning flow42; daemonize via setsid +
-    /// chdir, then run the recorder loop until SIGTERM.
+    ///
+    /// Two-step entry to keep both daemonization (setsid) AND macOS TCC
+    /// (Screen Recording) grants intact:
+    ///
+    ///   1. First call (no `--reexec`): we're a child of the spawning
+    ///      flow42 CLI. Call `setsid()` to become a session leader so the
+    ///      parent's exit doesn't take us with it, then execve ourselves
+    ///      with `--reexec` appended. The execve gives macOS a fresh
+    ///      identity check — no inherited "responsible process" baggage,
+    ///      just the binary's own code-sign identity.
+    ///
+    ///   2. Second call (with `--reexec`): skip setsid (already done),
+    ///      run the daemon loop. TCC sees the process as `com.flow42.cli`
+    ///      cleanly, so the user's Screen Recording grant applies.
+    ///
+    /// Without the execve, `setsid()` alone leaves a stale TCC
+    /// responsibility chain inherited from the spawning terminal, and
+    /// `CGPreflightScreenCaptureAccess()` returns false even when the
+    /// binary itself has the grant.
+    /// Tear down whatever stale state another session might have left
+    /// behind: kill a recorder daemon if one's still running, remove
+    /// any half-written stop-requested marker, clear the active-recording
+    /// claim, and reset the global state file to idle. Best-effort —
+    /// every step is wrapped so a partial failure doesn't block the
+    /// fresh start the user is actually asking for.
+    ///
+    /// This is the helper behind `flow42 record start --force`. The menu
+    /// ALWAYS passes --force because the UI gesture itself is the
+    /// user's "replace whatever's there" intent.
+    private static func forceCleanupBeforeStart() {
+        // 1. Kill any recorder daemon claiming an active session. The
+        //    SIGTERM gives it ~200ms to flush; SIGKILL is the hammer
+        //    for daemons that ignore TERM.
+        if let active = ActiveRecording.read(),
+           let pidInt = active["pid"] as? Int {
+            let pid = pid_t(pidInt)
+            if kill(pid, 0) == 0 {
+                _ = kill(pid, SIGTERM)
+                let deadline = Date().addingTimeInterval(0.4)
+                while Date() < deadline, kill(pid, 0) == 0 {
+                    usleep(50_000)
+                }
+                if kill(pid, 0) == 0 {
+                    _ = kill(pid, SIGKILL)
+                }
+            }
+            // Some recorders watch a `.stop-requested` file in the
+            // recording dir. If we're abandoning the dir entirely,
+            // wipe the marker so a re-use of the path doesn't get
+            // misread as "the user already pressed stop."
+            if let dir = active["dir"] as? String, !dir.isEmpty {
+                let stopMarker = (dir as NSString).appendingPathComponent(".stop-requested")
+                try? FileManager.default.removeItem(atPath: stopMarker)
+            }
+        }
+        ActiveRecording.clear()
+
+        // 2. Drop any stale play claim too. The CLI's pid-blind state
+        //    file means a play can outlive its own process; that
+        //    shouldn't block a recording.
+        try? StateFile.clearToIdle()
+    }
+
     private static func runDaemonEntry(args: [String]) {
         guard let slug = parseFlag(args, "--slug", "-s"),
               let dir = parseFlag(args, "--dir", "-D")
@@ -168,14 +226,53 @@ enum Record {
             exit(2)
         }
         let description = parseFlag(args, "--description", "-d")
-        _ = setsid()
-        chdir("/")
+        let isReexec = args.contains("--reexec")
+
+        if !isReexec {
+            // Step 1: detach + re-exec self with --reexec so TCC re-keys
+            // against the binary's own signature.
+            _ = setsid()
+            chdir("/")
+
+            let exePath = currentExecutablePath()
+            // Build new argv: original + --reexec flag.
+            var newArgv = ["record", "_daemon"] + args + ["--reexec"]
+            // Convert to C-style argv for execve.
+            let cArgs = ([exePath] + newArgv).map { strdup($0) }
+            defer { cArgs.forEach { free($0) } }
+            var argvPtrs: [UnsafeMutablePointer<CChar>?] = cArgs + [nil]
+            // Pass through environment unchanged.
+            let env = ProcessInfo.processInfo.environment
+            let envStrings = env.map { "\($0.key)=\($0.value)" }
+            let cEnv = envStrings.map { strdup($0) }
+            defer { cEnv.forEach { free($0) } }
+            var envPtrs: [UnsafeMutablePointer<CChar>?] = cEnv + [nil]
+            _ = argvPtrs.withUnsafeMutableBufferPointer { argvBuf in
+                envPtrs.withUnsafeMutableBufferPointer { envBuf in
+                    execve(exePath, argvBuf.baseAddress, envBuf.baseAddress)
+                }
+            }
+            // execve only returns on failure.
+            FileHandle.standardError.write(Data(
+                "daemon: execve failed (\(String(cString: strerror(errno)))) — falling back without re-exec\n".utf8
+            ))
+            // Fall through to the daemon loop anyway; TCC may not work
+            // for screenshots but at least the recording continues.
+        }
+
         runDaemonLoop(slug: slug, dir: dir, description: description)
     }
 
     /// Inside the forked child. Starts the recorder + audio, waits for
     /// SIGTERM/SIGINT, then finalises and exits.
     private static func runDaemonLoop(slug: String, dir: String, description: String?) {
+        // Defence in depth: the parent ran cleanup before forking us,
+        // but if we ended up here some other way (e.g. a manual
+        // `flow42 record _daemon` invocation, or a crash between
+        // cleanup and fork), do it again. The cleanup is idempotent
+        // and cheap when there's nothing to clean.
+        forceCleanupBeforeStart()
+
         let recorder = LearningRecorder.shared
         if let err = recorder.start(taskDescription: description, recordingDir: dir) {
             FileHandle.standardError.write(Data(
@@ -186,13 +283,11 @@ enum Record {
 
         try? ActiveRecording.set(slug: slug, dir: dir, pid: Int(getpid()))
 
-        // Announce mode=recording so the menu bar app lights up the magenta
-        // edge glow. Best-effort — failure to write state.json must not abort
+        // Announce recording so the menu bar app lights up the magenta edge
+        // glow. Best-effort — failure to write state.json must not abort
         // the recording itself.
         _ = try? StateFile.write(AppState(
-            mode: .recording,
-            label: description,
-            recording: AppState.RecordingInfo(slug: slug, dir: dir, pid: Int(getpid()))
+            recording: RecordingInfo(slug: slug, dir: dir, pid: Int(getpid()))
         ))
 
         let micErr = AudioRecorder.shared.start(recordingDir: dir)
@@ -263,33 +358,53 @@ enum Record {
         let stopMarker = (dir as NSString).appendingPathComponent(".stop-requested")
         FileManager.default.createFile(atPath: stopMarker, contents: Data())
 
-        // Poll for flow.json to appear. Whisper transcription can take ~1-3s
-        // per 10s of audio; cap at 60s overall.
-        let flowPath = (dir as NSString).appendingPathComponent("flow.json")
+        // Poll for meta.yaml to appear with `finalized: true`. Whisper
+        // transcription can take ~1-3s per 10s of audio; cap at 60s
+        // overall. The daemon writes meta.yaml as the very last step of
+        // finalize() — its presence + finalized flag is the canonical
+        // success signal.
+        let metaPath = (dir as NSString).appendingPathComponent("meta.yaml")
+        let warningPath = (dir as NSString).appendingPathComponent("recorder-warning.json")
         let deadline = Date().addingTimeInterval(60)
-        var written = false
+        var meta: [String: Any]? = nil
         while Date() < deadline {
-            if FileManager.default.fileExists(atPath: flowPath) {
-                written = true
+            if FileManager.default.fileExists(atPath: metaPath),
+               let text = try? String(contentsOf: URL(fileURLWithPath: metaPath), encoding: .utf8),
+               let parsed = (try? Yams.load(yaml: text)) as? [String: Any],
+               (parsed["finalized"] as? Bool) == true {
+                meta = parsed
+                break
+            }
+            // Bail early if the daemon hit a fatal error and dropped a
+            // warning sidecar — no point waiting the full 60s.
+            if FileManager.default.fileExists(atPath: warningPath) {
                 break
             }
             usleep(200_000)
         }
 
-        if written,
-           let data = try? Data(contentsOf: URL(fileURLWithPath: flowPath)),
-           let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+        if let meta {
             emitJSON([
                 "success": true,
                 "path": dir,
-                "slug": json["slug"] as? String ?? slug,
-                "action_count": json["action_count"] ?? 0,
-                "duration_seconds": json["duration_seconds"] ?? 0,
+                "slug": (meta["name"] as? String) ?? slug,
+                "action_count": meta["action_count"] ?? 0,
+                "duration_seconds": meta["duration_seconds"] ?? 0,
             ])
+        } else if FileManager.default.fileExists(atPath: warningPath),
+                  let data = try? Data(contentsOf: URL(fileURLWithPath: warningPath)),
+                  let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            emitJSON([
+                "success": false,
+                "error": "recorder finalize failed: \(json["warning"] as? String ?? "unknown")",
+                "path": dir,
+                "log": "\(dir)/recorder.log",
+            ])
+            exit(1)
         } else {
             emitJSON([
                 "success": false,
-                "error": "flow.json was not produced within 60s",
+                "error": "meta.yaml was not produced within 60s (recorder may still be transcribing or stuck)",
                 "path": dir,
                 "log": "\(dir)/recorder.log",
             ])
@@ -318,8 +433,9 @@ enum Record {
 
     // MARK: - finalise (used by daemon)
 
-    /// Stops the recorder, transcribes narration, merges sources, writes
-    /// flow.json. Returns a small dict suitable for printing to stdout.
+    /// Stops the recorder, transcribes narration, finalises step folders +
+    /// events.jsonl, writes top-level meta.yaml. Returns a small dict
+    /// suitable for printing to stdout.
     @discardableResult
     private static func finalize(slug: String, dir: String, wavURL: URL?) -> [String: Any] {
         let recorder = LearningRecorder.shared
@@ -328,9 +444,10 @@ enum Record {
             FileHandle.standardError.write(Data(
                 "warning: \(error.localizedDescription)\n".utf8
             ))
-            // Even on failure, write an empty flow.json so the stop command
-            // can find SOMETHING and report cleanly. An empty recording
-            // is still a recording.
+            // Drop a recorder-warning.json sidecar so `runStop` can bail
+            // out of its meta.yaml poll early with a meaningful error
+            // instead of waiting the full 60s. The events.jsonl + steps/
+            // tree may already be partially populated; we don't touch it.
             let payload: [String: Any] = [
                 "schema_version": 1,
                 "platform": "mac",
@@ -451,7 +568,8 @@ enum Record {
 
             // Top-level meta.yaml — session metadata the menu app's
             // recordings list and the agent's structuring pass both
-            // read. Replaces the flow.json header from the v1 layout.
+            // read. This is the file `runStop` polls for as the
+            // canonical "finalize complete" marker.
             let isoDate = ISO8601DateFormatter()
             isoDate.formatOptions = [.withInternetDateTime]
             let metaDict: [String: Any] = [
@@ -485,7 +603,7 @@ enum Record {
     Usage:
       flow42 record [--description X]   Start a backgrounded recorder daemon
                                          (alias for `flow42 record start`)
-      flow42 record stop                 Stop the active recorder, write flow.json
+      flow42 record stop                 Stop the active recorder, write meta.yaml
       flow42 record status               Report whether a recording is active
 
     Examples:

@@ -246,6 +246,12 @@ public enum LearningDispatch {
         dict["element"] = action.elementContext.map { serializeElement($0) } ?? NSNull()
         dict["screenshot"] = action.screenshotPath ?? NSNull()
         dict["annotated_screenshot"] = action.annotatedScreenshotPath ?? NSNull()
+        // Display the action happened on. Single-display setups always
+        // record the main display id; multi-display setups store the
+        // exact display so replay can subtract the right origin.
+        if action.displayId != 0 {
+            dict["display_id"] = Int(action.displayId)
+        }
 
         switch action.action {
         case .click(let x, let y, let button, let count):

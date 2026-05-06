@@ -33,11 +33,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var stateClient: StateClient!
     private var edgeGlow: EdgeGlowController!
+    private var playPanel: PlayPanelController!
     private var menu: MenuController!
     private var annotation: AnnotationController!
     private var subscription: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Singleton enforcement: before we read any state, drop any
+        // stale recording whose daemon pid is dead. This is the
+        // user's "the menu opened but I'm not actually recording —
+        // why is everything red?" failsafe. Cheap and idempotent.
+        StateFile.reconcile()
+
         // First-launch nicety: when running from an .app bundle, opt the
         // user into launch-at-login automatically. Skipped silently for
         // `swift run` dev workflows. The user can flip it via the menu.
@@ -45,22 +52,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let client = StateClient()
         let glow = EdgeGlowController()
-        let menu = MenuController(stateClient: client)
+        let panel = PlayPanelController(stateClient: client)
+        let menu = MenuController(stateClient: client, panelController: panel)
         let annotation = AnnotationController()
 
         self.stateClient = client
         self.edgeGlow = glow
+        self.playPanel = panel
         self.menu = menu
         self.annotation = annotation
 
         // Bridge state changes → edge glow.
         let cancellable = client.$state.sink { [weak self] state in
-            self?.edgeGlow.apply(mode: state.mode)
+            self?.edgeGlow.apply(state: state.derivedState)
         }
         self.subscription = cancellable
 
-        // Apply the initial mode immediately so a pre-set state.json shows up
-        // without waiting for a change.
-        edgeGlow.apply(mode: client.state.mode, animated: false)
+        // Apply the initial state immediately so a pre-set state.json shows
+        // up without waiting for a change.
+        edgeGlow.apply(state: client.state.derivedState, animated: false)
     }
 }

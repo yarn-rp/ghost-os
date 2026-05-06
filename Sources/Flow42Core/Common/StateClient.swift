@@ -1,25 +1,30 @@
 // StateClient.swift - FSEvents watcher on ~/.flow42/state.json.
 //
-// Publishes the current AppMode as an `AsyncStream`. Survives the file being
-// deleted and recreated (re-arms the watcher on the parent directory once the
-// file goes away). The CLI is the only writer; this client is read-only.
+// Publishes the current `AppState` via Combine `@Published`. Survives the
+// file being deleted and recreated (re-arms the watcher on the parent
+// directory once the file goes away). The CLI is the only writer; this
+// client is read-only.
+//
+// Lives in Flow42Core because both Flow42Menu (overlays) and Flow42App
+// (main window) need it — anywhere we render UI that reflects "what is
+// flow42 doing right now", we instantiate a StateClient and bind to its
+// `state` property.
 
 import Combine
 import Dispatch
-import Flow42Core
 import Foundation
 
 @MainActor
-final class StateClient: ObservableObject {
+public final class StateClient: ObservableObject {
 
-    @Published private(set) var state: AppState = StateFile.read()
+    @Published public private(set) var state: AppState = StateFile.read()
 
     private var fileSource: (any DispatchSourceFileSystemObject)?
     private var dirSource: (any DispatchSourceFileSystemObject)?
     private var fileFD: CInt = -1
     private var dirFD: CInt = -1
 
-    init() {
+    public init() {
         attachFileWatcher()
         attachDirWatcher()
     }
@@ -31,10 +36,12 @@ final class StateClient: ObservableObject {
         if dirFD >= 0 { close(dirFD) }
     }
 
-    /// Re-read state.json and notify subscribers.
+    /// Re-read state.json and notify subscribers. AppState is Equatable, so
+    /// we just compare the whole struct — covers any field change.
     private func reload() {
         let next = StateFile.read()
-        if next.mode != state.mode || next.label != state.label || next.since != state.since {
+        if next != state {
+            Log.info("[StateClient] state changed → derived=\(next.derivedState.rawValue) recording=\(next.recording != nil) play=\(next.play != nil)")
             state = next
         }
     }

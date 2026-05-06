@@ -1,20 +1,20 @@
-// Structure.swift - `flow42 structure <flow-dir>` — prepare a recording
-// for the agent's three-pass structuring flow.
+// Structure.swift - `flow42 structure <flow-dir>` — paste-ready instruction
+// for the agent's four-pass structuring flow.
 //
 // We don't drive Claude Code from inside flow42 — the agent loop lives
 // elsewhere (Claude Code today, the future Flow app's terminal-mode session
 // later). This subcommand exists so the user has a single ergonomic entry
 // point that:
 //
-//   1. Validates the recording dir has the v2 layout (events.jsonl + steps/).
-//   2. Re-seeds the structuring prompts into <dir>/.agent/ in case they
-//      drifted since `flow42 record start` (e.g. user upgraded flow42).
-//   3. Prints a paste-ready instruction the user hands to Claude Code:
-//      "structure ~/.flow42/flows/<name>", with a hint to read .agent/.
+//   1. Validates the recording dir has the canonical layout
+//      (events.jsonl + steps/).
+//   2. Prints a paste-ready instruction the user hands to Claude Code:
+//      "structure ~/.flow42/flows/<name>" — the flow-creator skill takes
+//      it from there.
 //
-// When the Flow app lands, this same command becomes the in-app "structure
-// recording" button — the app reads the same .agent/ prompts and pipes the
-// recording dir to its account-linked Claude / Codex session.
+// The skill (Sources/Flow42Core/Resources/skills/flow-creator/SKILL.md) is
+// self-contained — it owns the workflow, schema rules, and subagent
+// fan-out templates. Nothing gets seeded into the recording dir.
 
 import Flow42Core
 import Foundation
@@ -41,12 +41,12 @@ enum Structure {
 
         let dir = expandPath(dirArg)
 
-        // 1. Sanity-check the v2 layout.
+        // Sanity-check the canonical layout.
         let eventsJsonl = (dir as NSString).appendingPathComponent("events.jsonl")
         let stepsDir = (dir as NSString).appendingPathComponent("steps")
         guard FileManager.default.fileExists(atPath: eventsJsonl) else {
             FileHandle.standardError.write(Data(
-                "flow42 structure: \(dir) has no events.jsonl. Is this a v2 recording?\n".utf8
+                "flow42 structure: \(dir) has no events.jsonl. Is this a flow42 recording?\n".utf8
             ))
             exit(1)
         }
@@ -60,30 +60,18 @@ enum Structure {
             exit(1)
         }
 
-        // 2. Re-seed prompts. The recorder seeds these on `record start` but
-        // a flow42 upgrade between recording and structuring would leave the
-        // user with stale prompts — re-seeding here is cheap insurance.
-        let seeded: [String]
-        do {
-            seeded = try SeedPrompts.seed(into: dir)
-        } catch {
-            FileHandle.standardError.write(Data(
-                "flow42 structure: could not seed prompts: \(error.localizedDescription)\n".utf8
-            ))
-            exit(1)
-        }
-
-        // 3. Surface the next-step instruction.
         let stepCount = (try? FileManager.default.contentsOfDirectory(atPath: stepsDir))?.count ?? 0
         let lineCount = countJsonlLines(at: eventsJsonl)
+        let flowYaml = (dir as NSString).appendingPathComponent("flow.yaml")
+        let alreadyStructured = FileManager.default.fileExists(atPath: flowYaml)
 
         if jsonOnly {
             let payload: [String: Any] = [
                 "flow_dir": dir,
                 "events_count": lineCount,
                 "steps_count": stepCount,
-                "seeded": seeded,
-                "next_step": "Open Claude Code in the recording dir and ask it to read .agent/clarify-prompt.md.",
+                "flow_yaml_exists": alreadyStructured,
+                "next_step": "Open Claude Code in the recording dir and invoke the flow-creator skill.",
             ]
             if let data = try? JSONSerialization.data(
                 withJSONObject: payload,
@@ -95,22 +83,27 @@ enum Structure {
             return
         }
 
-        print("flow42 structure prepared \(dir)")
+        print("flow42 structure: \(dir)")
         print("  events.jsonl: \(lineCount) lines")
         print("  steps/:       \(stepCount) folders")
-        print("  prompts:      \(seeded.count) seeded into .agent/")
+        if alreadyStructured {
+            print("  flow.yaml:    already exists (re-running will refine, not overwrite blindly)")
+        } else {
+            print("  flow.yaml:    not yet written")
+        }
         print("")
-        print("Three-pass structuring (run in Claude Code):")
+        print("Four-pass structuring (run in Claude Code):")
         print("  1. Phase detection — read events.jsonl, draft phases.")
-        print("  2. Assemble GUI path — walk step folders, keep the recording faithful.")
-        print("  3. Headless alternatives — propose coarse swaps (shell > osascript > MCP).")
+        print("  2. Param detection — find the inputs the flow needs to be re-run with different values.")
+        print("  3. Strip noise + assemble GUI paths — fan out one subagent per phase.")
+        print("  4. Headless alternatives — propose coarse swaps where genuinely cheaper.")
         print("")
-        print("Next: open Claude Code in this directory and say:")
-        print("    structure this recording — read .agent/clarify-prompt.md, then write flow.yaml")
+        print("Next: open Claude Code with this directory in scope and say:")
+        print("    structure this recording at \(dirArg)")
         print("")
-        print("After the agent writes flow.yaml:")
-        print("    flow42 view \(dirArg)            # human-readable markdown")
-        print("    flow42 view \(dirArg) --path osascript > replay.scpt")
+        print("The flow-creator skill takes it from there. After it writes flow.yaml:")
+        print("    flow42 view \(dirArg)                          # human-readable markdown")
+        print("    flow42 view \(dirArg) --path osascript         # runnable script")
     }
 
     private static func countJsonlLines(at path: String) -> Int {
@@ -128,16 +121,12 @@ enum Structure {
         let msg = """
         Usage: flow42 structure <flow-dir> [--json]
 
-        Prepare a recorded flow for the agent's three-pass structuring run.
-
-        What it does:
-          1. Validates the recording has the v2 layout (events.jsonl + steps/).
-          2. Re-seeds .agent/ prompts (in case flow42 was upgraded since
-             the recording was made).
-          3. Prints a paste-ready instruction for Claude Code.
+        Validate a recording and print a paste-ready instruction for the
+        agent's four-pass structuring run.
 
         flow42 does NOT run the agent itself — it sets up the inputs.
-        Open Claude Code in the recording dir to drive the structuring.
+        Open Claude Code in the recording dir to drive the structuring;
+        the flow-creator skill owns the workflow.
 
         Options:
           --json     Emit a one-shot JSON status (no advisory prose). Useful

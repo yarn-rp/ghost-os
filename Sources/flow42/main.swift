@@ -27,6 +27,20 @@ if let first = args.first, first.hasPrefix("chrome-extension://") {
 }
 let command = args.first ?? "help"
 
+// Make sure the menu app + main app are alive before any command that
+// drives a session. The menu owns the edge glow, the floating timeline,
+// and the recorder daemon's UI affordances; the main app owns the deep-
+// link receiver and the chat handoff. A CLI invocation that touches
+// state without these visible companions is a regression — the user
+// loses the recording indicator, the stop button, and the auto-handoff
+// chat that completes the loop.
+let needsCompanions: Set<String> = [
+    "record", "play", "do", "stop", "snapshot", "wait",
+]
+if needsCompanions.contains(command) {
+    ensureCompanionApps()
+}
+
 switch command {
 case "mcp":
     let server = MCPServer()
@@ -49,8 +63,14 @@ case "record":
 case "flows":
     Flows.run(args: Array(args.dropFirst()))
 
-case "act":
-    Act.run(args: Array(args.dropFirst()))
+case "play":
+    Play.run(args: Array(args.dropFirst()))
+
+case "do":
+    DoCmd.run(args: Array(args.dropFirst()))
+
+case "stop":
+    Stop.run(args: Array(args.dropFirst()))
 
 case "snapshot":
     Snapshot.run(args: Array(args.dropFirst()))
@@ -88,9 +108,6 @@ case "setup-browser":
 case "native-host":
     NativeHost.run()
 
-case "mode":
-    Mode.run(args: Array(args.dropFirst()))
-
 case "annotations":
     Annotations.run(args: Array(args.dropFirst()))
 
@@ -116,6 +133,93 @@ default:
     fputs("Unknown command: \(command)\n", stderr)
     printUsage()
     exit(1)
+}
+
+// MARK: - Companion app launching
+
+/// Best-effort launch of `Flow42Menu` and `Flow42App` if they aren't
+/// already running. Resolves the binaries relative to the running
+/// `flow42` executable so a development build (.build/debug/flow42)
+/// finds the sibling debug binaries, and an installed build
+/// (/usr/local/bin/flow42 or a homebrew prefix) finds installed
+/// siblings. Failure to launch is silent — the CLI command still
+/// proceeds; the user just loses the visual chrome and we'll surface
+/// that absence later via the `flow42 doctor` path.
+func ensureCompanionApps() {
+    let exePath = resolvedExecutablePath()
+    let exeDir = (exePath as NSString).deletingLastPathComponent
+    launchSiblingIfNotRunning(name: "Flow42Menu", siblingDir: exeDir)
+    launchSiblingIfNotRunning(name: "Flow42App", siblingDir: exeDir)
+}
+
+/// Resolved absolute path of the running flow42 binary, with symlinks
+/// followed. Mirrors the helper Record.swift uses for daemon re-exec
+/// so we don't drift from "where am I really?" semantics.
+private func resolvedExecutablePath() -> String {
+    var size = UInt32(0)
+    _ = _NSGetExecutablePath(nil, &size)
+    let buf = UnsafeMutablePointer<CChar>.allocate(capacity: Int(size))
+    defer { buf.deallocate() }
+    guard _NSGetExecutablePath(buf, &size) == 0 else {
+        return CommandLine.arguments[0]
+    }
+    return URL(fileURLWithPath: String(cString: buf))
+        .resolvingSymlinksInPath().path
+}
+
+/// Spawn `<siblingDir>/<name>` as a detached process if no process with
+/// that name is currently running. Process matching is by basename of
+/// the executable path because that's what `NSRunningApplication` and
+/// `pgrep -f` agree on across debug and installed builds.
+private func launchSiblingIfNotRunning(name: String, siblingDir: String) {
+    if isProcessRunning(named: name) { return }
+    let candidate = (siblingDir as NSString).appendingPathComponent(name)
+    guard FileManager.default.isExecutableFile(atPath: candidate) else {
+        // No sibling at this path — running from a partial install or
+        // an unfamiliar layout. Stay silent; the user can launch the
+        // app manually.
+        return
+    }
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: candidate)
+    task.arguments = []
+    // Detach from this process group: when the CLI exits, the apps
+    // keep running. Standard streams go to /dev/null so the apps don't
+    // accidentally write into the CLI's stdout (which would corrupt
+    // any JSON output downstream).
+    if let nullR = FileHandle(forReadingAtPath: "/dev/null") {
+        task.standardInput = nullR
+    }
+    if let nullW = FileHandle(forWritingAtPath: "/dev/null") {
+        task.standardOutput = nullW
+        task.standardError = nullW
+    }
+    do {
+        try task.run()
+        // Give the menu/app a brief moment to claim its UI scene before
+        // the calling command starts emitting state changes. ~250ms is
+        // enough for AppKit to stand up the menu bar item without
+        // making the CLI feel sluggish.
+        usleep(250_000)
+    } catch {
+        // Swallow — companion launch is best-effort. A missing menu
+        // doesn't block recording; the user will notice and can
+        // launch manually.
+    }
+}
+
+/// Is there a running process whose executable basename matches `name`?
+/// Uses `NSRunningApplication.runningApplications(withBundleIdentifier:)`
+/// when possible (fast and exact) and falls back to scanning every
+/// running application's executable URL for the basename.
+private func isProcessRunning(named name: String) -> Bool {
+    for app in NSWorkspace.shared.runningApplications {
+        if let url = app.executableURL,
+           url.lastPathComponent == name {
+            return true
+        }
+    }
+    return false
 }
 
 // MARK: - Status
@@ -158,8 +262,14 @@ func printUsage() {
       status         Quick health check
       record         Record a flow to ~/.flow42/flows/
       flows          List recordings in ~/.flow42/flows/
-      act            Execute one action (click, type, press, hotkey, scroll,
-                     hover, long-press, drag, window, focus, app-switch, navigate)
+      play           Open / advance / pause / end a play of a recorded flow
+                     (start | end | current | next | pause | resume | wait |
+                     show | list | log)
+      do             Execute one unit action during an active driving play
+                     (click, type, press, hotkey, scroll, hover, long-press,
+                     drag, window, focus, app-switch, navigate). Replaces
+                     the previous `act` namespace.
+      stop           End whichever session (recording or play) is active
       snapshot       Capture an image of the current screen / page
       tree           Dump the accessibility hierarchy of the current screen / page
       state          List running apps with windows, positions, sizes
@@ -169,7 +279,6 @@ func printUsage() {
       read           Extract text content from an app or element subtree
       annotate       Set-of-Marks labeled screenshot
       wait           Poll for a condition with timeout (urlContains, elementExists, …)
-      mode           Get/set the menu app's mode (idle | recording | autonomous)
       annotations    List/show/clear annotations captured via Cmd+Shift+A
       structure      Prepare a recording for the agent's three-pass structuring
       view           Render a recorded flow.yaml as markdown (human or

@@ -8,6 +8,10 @@ DerivedData/
 .DS_Store
 local/
 
+# Local dev artifacts (per-session logs, pid files, nohup output)
+.flow42/
+nohup.out
+
 # Claude Code plugin (local development)
 .claude-plugin/
 agents/

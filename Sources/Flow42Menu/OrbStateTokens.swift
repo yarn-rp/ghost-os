@@ -1,15 +1,15 @@
 // OrbStateTokens.swift - Swift port of davos `orb_state_tokens.dart`.
 //
-// Same hex values, same intensity/pulse/movement scalars. Flow42 only uses
-// three of the five davos states:
+// Same hex values, same intensity/pulse/movement scalars. Flow42 maps four
+// derived states to glow tokens:
 //
-//   davos `idle`      → flow42 `.idle`        (no glow drawn)
-//   davos `listening` → flow42 `.recording`   (magenta — "we're capturing")
-//   davos `speaking`  → flow42 `.autonomous`  (orange  — "agent is driving")
+//   davos `idle`       → flow42 `.idle`       (no glow drawn)
+//   davos `listening`  → flow42 `.recording`  (magenta — "we're capturing")
+//   davos `speaking`   → flow42 `.driving`    (orange  — "agent is driving")
+//   (new)              → flow42 `.watching`   (cyan    — "user is driving, agent is watching")
 //
-// We intentionally don't expose `thinking` or `error` here; the menu app's
-// rotation is just two visible states + idle. Annotations have their own
-// dedicated overlay UI and don't repurpose the edge glow.
+// Annotations have their own dedicated overlay UI and don't repurpose the
+// edge glow.
 
 import Flow42Core
 import SwiftUI
@@ -22,10 +22,10 @@ struct OrbStateTokens {
     let pulse: Double
     let movement: Double
 
-    /// Map an `AppMode` from the shared state file to its glow tokens.
+    /// Map a `DerivedState` from the shared state file to its glow tokens.
     /// Returns `nil` for `.idle` so callers can early-out without drawing.
-    static func tokens(for mode: AppMode) -> OrbStateTokens? {
-        switch mode {
+    static func tokens(for state: DerivedState) -> OrbStateTokens? {
+        switch state {
         case .idle:
             return nil
         case .recording:
@@ -38,7 +38,7 @@ struct OrbStateTokens {
                 pulse: 1.1,
                 movement: 0.9
             )
-        case .autonomous:
+        case .driving:
             // davos `speaking`: orange
             return OrbStateTokens(
                 core: Color(red: 0xFF/255, green: 0xD4/255, blue: 0xA8/255),
@@ -47,6 +47,17 @@ struct OrbStateTokens {
                 intensity: 1.0,
                 pulse: 2.0,
                 movement: 1.5
+            )
+        case .watching:
+            // user-driving / agent-paused: cyan, slower pulse to communicate
+            // a calmer "agent is along for the ride" mood.
+            return OrbStateTokens(
+                core: Color(red: 0xA8/255, green: 0xE7/255, blue: 0xFF/255),
+                mid:  Color(red: 0x3D/255, green: 0xB6/255, blue: 0xFF/255),
+                edge: Color(red: 0x12/255, green: 0x52/255, blue: 0x7C/255),
+                intensity: 0.55,
+                pulse: 1.4,
+                movement: 1.0
             )
         }
     }

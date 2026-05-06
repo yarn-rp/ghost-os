@@ -15,7 +15,7 @@ final class EdgeGlowController {
 
     private var windows: [EdgeGlowWindow] = []
     private var hostingViews: [NSHostingView<EdgeGlowView>] = []
-    private var currentMode: AppMode = .idle
+    private var currentState: DerivedState = .idle
 
     init() {
         rebuildWindowsForScreens()
@@ -25,7 +25,7 @@ final class EdgeGlowController {
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
-        apply(mode: .idle, animated: false)
+        apply(state: .idle, animated: false)
     }
 
     deinit {
@@ -34,13 +34,13 @@ final class EdgeGlowController {
 
     /// Drive a new mode. Idle hides the windows entirely; non-idle modes show
     /// them and update the hosted view's mode binding.
-    func apply(mode: AppMode, animated: Bool = true) {
-        currentMode = mode
+    func apply(state: DerivedState, animated: Bool = true) {
+        currentState = state
         for (i, window) in windows.enumerated() {
             // Replace contents so the SwiftUI view re-evaluates with the new
             // mode (the simplest path that doesn't require `@Published` state
             // bridges between AppKit and SwiftUI).
-            let newHost = NSHostingView(rootView: EdgeGlowView(mode: mode))
+            let newHost = NSHostingView(rootView: EdgeGlowView(state: state))
             newHost.frame = window.contentView?.bounds ?? .zero
             newHost.autoresizingMask = [.width, .height]
             window.contentView = newHost
@@ -50,13 +50,24 @@ final class EdgeGlowController {
                 hostingViews.append(newHost)
             }
 
-            if mode == .idle {
+            if state == .idle {
                 if animated {
                     NSAnimationContext.runAnimationGroup { ctx in
                         ctx.duration = 0.4
                         window.animator().alphaValue = 0
-                    } completionHandler: {
-                        Task { @MainActor in window.orderOut(nil) }
+                    } completionHandler: { [weak self] in
+                        // Only hide if we're STILL idle by the time the
+                        // fade-out completes. Without this guard, a
+                        // rapid idle → recording transition (which is
+                        // exactly what `flow42 record start` produces)
+                        // hits this completion AFTER the new
+                        // recording's `orderFrontRegardless` and yanks
+                        // the window back off-screen — that was the
+                        // edge-glow-during-recording regression.
+                        Task { @MainActor in
+                            guard self?.currentState == .idle else { return }
+                            window.orderOut(nil)
+                        }
                     }
                 } else {
                     window.alphaValue = 0
@@ -77,7 +88,7 @@ final class EdgeGlowController {
 
     @objc private func screensChanged() {
         rebuildWindowsForScreens()
-        apply(mode: currentMode, animated: false)
+        apply(state: currentState, animated: false)
     }
 
     private func rebuildWindowsForScreens() {
@@ -90,7 +101,7 @@ final class EdgeGlowController {
 
         for screen in NSScreen.screens {
             let window = EdgeGlowWindow(screen: screen)
-            let host = NSHostingView(rootView: EdgeGlowView(mode: currentMode))
+            let host = NSHostingView(rootView: EdgeGlowView(state: currentState))
             host.frame = window.contentLayoutRect
             host.autoresizingMask = [.width, .height]
             window.contentView = host

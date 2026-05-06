@@ -446,6 +446,12 @@ final class AnnotationController: ObservableObject {
         panel.hasShadow = false
         panel.isMovable = false
         panel.ignoresMouseEvents = true   // CRITICAL — lets clicks pass through
+        // Hide from recordings + screenshots — same exclusion the
+        // floating panel and edge glow use. Annotations are visual
+        // chrome the user sees on top of their app, but the recorder's
+        // per-step screenshots should show the underlying app, not
+        // our crosshair / drag rect.
+        panel.sharingType = .none
 
         let host = NSHostingView(rootView: AnnotationOverlayView(controller: self))
         host.frame = NSRect(origin: .zero, size: screen.frame.size)

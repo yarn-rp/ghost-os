@@ -110,9 +110,7 @@ flow42 record stop
 
 This:
 - Tells the daemon to finalise (closes the step folders + events.jsonl,
-  transcribes narration, writes audio/narration.txt). Legacy flow.json
-  is also tee'd alongside for the menu timeline; that goes away in
-  Phase C.
+  transcribes narration, writes audio/narration.txt).
 - Blocks for up to 60 seconds while transcription completes.
 - Returns a JSON line:
   ```json
@@ -127,18 +125,11 @@ Capture the `path`.
 Immediately invoke `flow-creator` on the recording directory. Don't pause
 to ask the user what to do next:
 
-> "Recorded N actions over D seconds at `<path>`. Now I'll analyze it and
-> walk through what to keep, how to phase it, and what to parameterise.
-> One moment…"
+> "Recorded N actions over D seconds at `<path>`. Now I'll structure it —
+> detect phases, find the parameters, strip noise, propose cheaper
+> headless paths. One moment…"
 
-Then load and run `flow-creator`. It will:
-- Read events.jsonl (Pass 1, lightweight) to detect phase boundaries.
-- Walk step folders' meta.yaml (Pass 2) to assemble each phase's
-  faithful GUI path.
-- Propose coarse headless alternatives (Pass 3) — shell, osascript,
-  MCP, or CLI — that swap whole phases at once.
-- Write `flow.yaml` — the single source of truth. No SKILL.md / human
-  guide artifacts; markdown is rendered on demand by `flow42 view`.
+Then load and run `flow-creator`. It runs a four-pass workflow that ends with `<path>/flow.yaml` — the single source of truth. No SKILL.md / human guide artifacts; markdown is rendered on demand by `flow42 view`.
 
 ## Hard rules
 

@@ -47,6 +47,12 @@ nonisolated public final class AudioRecorder: @unchecked Sendable {
     private var isRunning = false
     private var bufferCount = 0
     private var lastBufferLog = Date.distantPast
+    /// Built lazily inside the tap closure once we've observed the first
+    /// buffer's real format. Avoids the macOS-14 "format mismatch"
+    /// exception we'd raise if we tried to install the tap with a
+    /// pre-computed format that diverges from the bus's hardware-
+    /// canonical one.
+    private var cachedConverter: AVAudioConverter?
 
     /// Start capturing the mic into `<recordingDir>/audio/narration.wav`. Returns
     /// nil on success.
@@ -98,27 +104,42 @@ nonisolated public final class AudioRecorder: @unchecked Sendable {
         log("input format  sr=\(inputFormat.sampleRate) ch=\(inputFormat.channelCount)")
 
         // Whisper wants 16 kHz mono Float32 internally; the file write target
-        // is 16 kHz mono Int16. Tap delivers the input's native format and we
-        // convert to the file's format on every buffer.
+        // is 16 kHz mono Int16. The tap delivers buffers in whatever format
+        // the bus is configured for; we convert to our write format on the
+        // fly. The converter is built lazily inside the tap closure based
+        // on the FIRST buffer's actual format — that's the only way to
+        // dodge the AVFoundation "format mismatch" exception macOS 14+
+        // raises when the format we ask for doesn't match the bus's
+        // hardware-canonical format. Passing `nil` to installTap below
+        // tells AVAudioEngine to use the bus's actual format so we can
+        // never desync.
         let convertFormat = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
             sampleRate: 16_000,
             channels: 1,
             interleaved: true
         )!
-        let converter = AVAudioConverter(from: inputFormat, to: convertFormat)
-        if converter == nil {
-            log("AVAudioConverter init failed; cannot resample to 16 kHz")
-            return .engineError(NSError(
-                domain: "AudioRecorder", code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "converter init failed"]
-            ))
-        }
 
         bufferCount = 0
-        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buf, _ in
+        // Cache the converter once we've seen the first buffer's real
+        // format. Held in a class storage so the closure can mutate it
+        // across calls without paying the AVAudioConverter init cost
+        // every buffer.
+        cachedConverter = nil
+        input.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buf, _ in
             guard let self else { return }
-            guard let conv = converter,
+            // Build the converter on the first buffer once we know the
+            // real input format. Subsequent buffers reuse it.
+            if self.cachedConverter == nil {
+                if let conv = AVAudioConverter(from: buf.format, to: convertFormat) {
+                    self.cachedConverter = conv
+                    log("converter initialised from \(buf.format.sampleRate)Hz/\(buf.format.channelCount)ch → 16kHz/1ch")
+                } else {
+                    log("AVAudioConverter init failed; cannot resample to 16 kHz")
+                    return
+                }
+            }
+            guard let conv = self.cachedConverter,
                   let outBuf = AVAudioPCMBuffer(
                     pcmFormat: convertFormat,
                     frameCapacity: AVAudioFrameCount(convertFormat.sampleRate)

@@ -96,8 +96,21 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
         lastBrowser = URLChangeDetector.LastSeen()
         // Cache the menu app's PID so the click-filter below can drop events
         // targeting our own popover / status item without a per-event lookup.
-        menuAppPid = NSWorkspace.shared.runningApplications.first {
-            $0.bundleIdentifier == "com.web42.flow42.menu"
+        // Find the menu app PID. Production .app bundle has bundle
+        // identifier `com.web42.flow42.menu`; the dev binary (no
+        // Info.plist) doesn't have a bundle id at all, so fall back to
+        // matching by executable name. Either way, the recorder uses
+        // this PID to drop clicks on the menu app's own UI (status
+        // item, popover, floating panel, alerts).
+        menuAppPid = NSWorkspace.shared.runningApplications.first { app in
+            if app.bundleIdentifier == "com.web42.flow42.menu" { return true }
+            // Dev binary fallback: match by executable file name. The
+            // executable is always `Flow42Menu` whether it's running
+            // bare or inside a .app bundle.
+            if app.executableURL?.lastPathComponent == "Flow42Menu" { return true }
+            // Older builds expose the localizedName even without bundle id.
+            if app.localizedName == "Flow42Menu" { return true }
+            return false
         }?.processIdentifier ?? 0
         os_unfair_lock_unlock(&lock)
         // Clear any stale suppression marker (from a crashed prior session
@@ -225,6 +238,16 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
     // MARK: - Event Handling (learning thread)
 
     fileprivate func handleEvent(_ type: CGEventType, _ event: CGEvent) {
+        // DIAGNOSTIC: log every event type the tap delivers. Lets us
+        // verify (a) the tap is alive, (b) clicks vs. keys are
+        // separable, and (c) where in the pipeline events drop. Cheap;
+        // recorder sessions are seconds-long so the log won't grow
+        // unbounded.
+        if type == .leftMouseDown || type == .rightMouseDown
+           || type == .leftMouseUp || type == .rightMouseUp {
+            let loc = event.location
+            learningLog("DEBUG", "tap-event type=\(type.rawValue) at (\(Int(loc.x)),\(Int(loc.y)))")
+        }
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             os_unfair_lock_lock(&lock)
             if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
@@ -287,7 +310,16 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
            (type == .leftMouseDown || type == .leftMouseUp
             || type == .rightMouseDown || type == .rightMouseUp),
            clickTargetsPID(menuAppPid, eventLocation: event.location) {
+            learningLog("DEBUG", "tap-event dropped: click targets menu app pid=\(menuAppPid)")
             return
+        }
+        // DIAGNOSTIC: log when a click survives ALL filters and is
+        // about to be routed to a handler. If we never see this for
+        // a click, something earlier dropped it; if we see it but no
+        // matching events.jsonl line lands, the handler / writer is
+        // the regression.
+        if type == .leftMouseDown || type == .rightMouseDown {
+            learningLog("DEBUG", "tap-event routing to handleMouseDown")
         }
 
         switch type {
@@ -307,6 +339,12 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
         guard let windows = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]]
         else { return false }
         for info in windows {
+            // Skip non-app-layer windows. The menu app paints a full-
+            // screen `EdgeGlowWindow` at `.statusBar` level (layer 25)
+            // during recording; without this filter EVERY click would
+            // appear to target the menu app and the recorder would
+            // drop them all. Real app windows live at layer 0.
+            if let layer = info[kCGWindowLayer as String] as? Int, layer != 0 { continue }
             guard let pidNum = info[kCGWindowOwnerPID as String] as? Int,
                   let bounds = info[kCGWindowBounds as String] as? [String: Any],
                   let x = bounds["X"] as? Double,
@@ -1014,7 +1052,14 @@ nonisolated public final class LearningRecorder: @unchecked Sendable {
     /// topmost on screen, slot it under the next step index. Acquires the
     /// lock briefly to read state, then releases it before doing the slow
     /// file write.
-    private func captureNonClickScreenshot() -> String? {
+    /// Capture a screenshot of whatever's frontmost, write it under
+    /// `<recordingDir>/screenshots/step-NNN.jpg`, and return the relative
+    /// path for the StepFolderWriter to move into the step folder.
+    /// Used by deferred-flush helpers (typeText / scroll) and by
+    /// `AppSwitchDetector` so app-switch steps get a screenshot too.
+    /// Internal access so collaborators in the same module can reuse it
+    /// without reimplementing the slot allocation + capture dance.
+    internal func captureNonClickScreenshot() -> String? {
         guard let slot = nextScreenshotSlot() else { return nil }
         return LearningScreenshot.capture(
             stepIndex: slot.stepIndex,

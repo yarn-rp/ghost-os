@@ -17,11 +17,11 @@ import SwiftUI
 private let edgeTransitionMs: Double = 1000
 
 struct EdgeGlowView: View {
-    let mode: AppMode
+    let state: DerivedState
 
     var body: some View {
         // Idle is empty — no draw, no animation, no battery.
-        if mode == .idle {
+        if state == .idle {
             Color.clear
         } else {
             SwiftUI.TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { timeline in
@@ -29,7 +29,7 @@ struct EdgeGlowView: View {
                     paintEdges(
                         context: context,
                         size: size,
-                        mode: mode,
+                        state: state,
                         now: timeline.date.timeIntervalSinceReferenceDate
                     )
                 }
@@ -42,17 +42,18 @@ struct EdgeGlowView: View {
     private func paintEdges(
         context: GraphicsContext,
         size: CGSize,
-        mode: AppMode,
+        state: DerivedState,
         now: TimeInterval
     ) {
-        guard let tokens = OrbStateTokens.tokens(for: mode) else { return }
+        guard let tokens = OrbStateTokens.tokens(for: state) else { return }
 
         let w = size.width
         let h = size.height
         let t = now  // seconds
 
-        // Pulse cadence — speaking-style gets the faster, deeper modulation.
-        let isFast = mode == .autonomous
+        // Pulse cadence — driving gets the faster, deeper modulation;
+        // watching pulses gentler (it's "the user is in control").
+        let isFast = state == .driving
         let pulse = 1.0 + (isFast ? 0.15 : 0.06) * sin(t * (isFast ? 3.0 : 1.8))
 
         // Steady-state energy proxy — davos smooths toward

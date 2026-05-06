@@ -37,6 +37,12 @@ nonisolated enum AppSwitchDetector {
         recorder.flushPendingKeystrokesOnLearningThread()
         recorder.flushPendingScrollOnLearningThread()
 
+        // Capture a screenshot at the moment of the switch — by the time
+        // we get here the new app is frontmost, so the user sees the
+        // post-switch state. Same staging path as keystroke / scroll
+        // flushes; StepFolderWriter moves it into the step folder.
+        let screenshotPath = recorder.captureNonClickScreenshot()
+
         recorder.appendAction(ObservedAction(
             timestamp: mach_absolute_time(),
             action: .appSwitch(toApp: name, toBundleId: bundleId),
@@ -44,7 +50,8 @@ nonisolated enum AppSwitchDetector {
             appBundleId: "",
             windowTitle: nil,
             url: nil,
-            elementContext: nil
+            elementContext: nil,
+            screenshotPath: screenshotPath
         ))
 
         learningLog("DEBUG", "Learning: app switch detected \(previousApp) -> \(name)")

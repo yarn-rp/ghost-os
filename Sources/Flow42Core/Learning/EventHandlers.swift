@@ -143,9 +143,14 @@ nonisolated enum EventHandlers {
     // MARK: - Mouse Down
 
     static func handleMouseDown(_ type: CGEventType, _ event: CGEvent, recorder: LearningRecorder) {
+        let entryLoc = event.location
+        learningLog("DEBUG", "handleMouseDown ENTER type=\(type.rawValue) at (\(Int(entryLoc.x)),\(Int(entryLoc.y)))")
         // Defer in-page clicks to the extension; capture clicks on Chrome's
         // own UI (URL bar, tabs, three-dot menu, bookmarks bar, etc.).
-        if isDomSidecarFocused() && isPointInWebArea(at: event.location) { return }
+        if isDomSidecarFocused() && isPointInWebArea(at: event.location) {
+            learningLog("DEBUG", "handleMouseDown DROP: dom sidecar in-page click")
+            return
+        }
 
         recorder.flushPendingKeystrokesOnLearningThread()
         recorder.flushPendingScrollOnLearningThread()
@@ -162,18 +167,24 @@ nonisolated enum EventHandlers {
         var rawPath: String?
         var annotatedPath: String?
         if let slot = recorder.nextScreenshotSlot() {
+            learningLog("DEBUG", "handleMouseDown SHOT entry stepIndex=\(slot.stepIndex)")
             rawPath = LearningScreenshot.capture(
                 stepIndex: slot.stepIndex,
                 recordingDir: slot.recordingDir
             )
+            learningLog("DEBUG", "handleMouseDown SHOT raw=\(rawPath ?? "nil")")
             annotatedPath = LearningScreenshot.capture(
                 stepIndex: slot.stepIndex,
                 recordingDir: slot.recordingDir,
                 annotated: true,
                 clickPoint: loc
             )
+            learningLog("DEBUG", "handleMouseDown SHOT annotated=\(annotatedPath ?? "nil")")
+        } else {
+            learningLog("DEBUG", "handleMouseDown SHOT skipped (no screenshot slot)")
         }
 
+        learningLog("DEBUG", "handleMouseDown APPEND about to call recorder.appendAction button=\(button) clicks=\(clicks) app=\(app)")
         recorder.appendAction(ObservedAction(
             timestamp: mach_absolute_time(),
             action: .click(x: Double(loc.x), y: Double(loc.y), button: button, count: clicks),
@@ -181,8 +192,21 @@ nonisolated enum EventHandlers {
             windowTitle: currentWindowTitle(), url: currentURL(),
             elementContext: enrichClick(at: loc),
             screenshotPath: rawPath,
-            annotatedScreenshotPath: annotatedPath
+            annotatedScreenshotPath: annotatedPath,
+            displayId: displayIdContaining(loc)
         ))
+        learningLog("DEBUG", "handleMouseDown EXIT (action appended)")
+    }
+
+    /// CGDirectDisplayID of the display containing `point`. Falls back to the
+    /// main display id if the lookup fails. We persist this so multi-display
+    /// replays can re-anchor coordinates against the right display origin.
+    private static func displayIdContaining(_ point: CGPoint) -> UInt32 {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 1)
+        var matchCount: UInt32 = 0
+        let err = CGGetDisplaysWithPoint(point, 1, &ids, &matchCount)
+        if err == .success, matchCount > 0 { return ids[0] }
+        return CGMainDisplayID()
     }
 
     // MARK: - Scroll

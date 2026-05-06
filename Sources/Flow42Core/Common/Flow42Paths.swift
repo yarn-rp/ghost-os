@@ -42,6 +42,43 @@ public enum Flow42Paths {
         (root() as NSString).appendingPathComponent("state.json")
     }
 
+    /// `config.yaml` — persistent user prefs (selected AI provider, etc.).
+    /// Distinct from `state.json` (transient session state); this file
+    /// survives across restarts and is the source of truth for "which AI
+    /// am I connected to?". Read by Flow42App and (eventually) any CLI
+    /// verb that needs the active provider.
+    public nonisolated static func configFile() -> String {
+        (root() as NSString).appendingPathComponent("config.yaml")
+    }
+
+    /// `agent-latest.json` — most recent TranscriptEvent from an active
+    /// autonomous run. Atomic (write-temp + rename), tiny (~1 KB).
+    /// Watched by Flow42Menu's PlayPanel to render the in-panel agent-
+    /// activity bubble. Distinct from agent-transcript.jsonl (full log)
+    /// because the panel only ever needs to show the latest event.
+    public nonisolated static func agentLatestFile() -> String {
+        (root() as NSString).appendingPathComponent("agent-latest.json")
+    }
+
+    /// `agent-transcript.jsonl` — append-only log of all TranscriptEvents
+    /// from the current/most-recent autonomous run. One JSON object per
+    /// line. Truncated at the start of each new run (the previous run's
+    /// log is already viewable inside the play's own logs). Read by
+    /// Flow42Menu's chat-mode swap to render the full conversation.
+    public nonisolated static func agentTranscriptLog() -> String {
+        (root() as NSString).appendingPathComponent("agent-transcript.jsonl")
+    }
+
+    /// `agent-input.jsonl` — the user → agent input pipe. The menu app
+    /// (which owns the chat input field) appends one JSON object per
+    /// line; Flow42App watches via DispatchSource and forwards each new
+    /// line to the live ACP session. Truncated at the start of each new
+    /// autonomous run. Mirrors `agent-transcript.jsonl` but flows in
+    /// the opposite direction.
+    public nonisolated static func agentInputLog() -> String {
+        (root() as NSString).appendingPathComponent("agent-input.jsonl")
+    }
+
     /// `active-recording.json` — small marker the native messaging host
     /// (and other helpers) read to learn whether a recording is running
     /// and where its directory is.

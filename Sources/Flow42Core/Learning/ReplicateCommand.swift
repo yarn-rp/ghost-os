@@ -23,28 +23,44 @@ nonisolated public enum ReplicateCommand {
         let app = action.appName.isEmpty ? nil : action.appName
         switch action.action {
         case .click(let x, let y, let button, let count):
-            var argv = ["act", "click",
+            var argv = ["do", "click",
                         "--x", trim(x),
                         "--y", trim(y),
                         "--button", button,
                         "--count", String(count)]
             if let app { argv += ["--app", app] }
+            // Pass the recorded element fingerprint through to the replay
+            // CLI so Actions.click() can validate the hit point at replay
+            // time. Empty values are skipped to keep the command tidy.
+            if let ec = action.elementContext {
+                if let r = ec.role, !r.isEmpty {
+                    argv += ["--expected-role", r]
+                }
+                if let n = ec.computedName, !n.isEmpty {
+                    argv += ["--expected-name", n]
+                } else if let t = ec.title, !t.isEmpty {
+                    argv += ["--expected-name", t]
+                }
+                if let d = ec.domId, !d.isEmpty {
+                    argv += ["--expected-dom-id", d]
+                }
+            }
             return Built(shellString: shellJoin(argv), argv: argv)
 
         case .typeText(let text):
-            var argv = ["act", "type", "--text", text]
+            var argv = ["do", "type", "--text", text]
             if let app { argv += ["--app", app] }
             return Built(shellString: shellJoin(argv), argv: argv)
 
         case .keyPress(_, let keyName, let modifiers):
-            var argv = ["act", "press", "--key", keyName]
+            var argv = ["do", "press", "--key", keyName]
             if !modifiers.isEmpty { argv += ["--modifiers", modifiers.joined(separator: ",")] }
             if let app { argv += ["--app", app] }
             return Built(shellString: shellJoin(argv), argv: argv)
 
         case .hotkey(let modifiers, let keyName):
             let combo = (modifiers + [keyName]).joined(separator: ",")
-            var argv = ["act", "hotkey", "--keys", combo]
+            var argv = ["do", "hotkey", "--keys", combo]
             if let app { argv += ["--app", app] }
             return Built(shellString: shellJoin(argv), argv: argv)
 
@@ -58,7 +74,7 @@ nonisolated public enum ReplicateCommand {
                 direction = dx > 0 ? "left" : "right"
                 amount = abs(dx)
             }
-            var argv = ["act", "scroll",
+            var argv = ["do", "scroll",
                         "--direction", direction,
                         "--amount", String(max(1, amount)),
                         "--x", trim(x), "--y", trim(y)]
@@ -75,7 +91,7 @@ nonisolated public enum ReplicateCommand {
             } else {
                 return nil
             }
-            let argv = ["act", "app-switch", "--to", target]
+            let argv = ["do", "app-switch", "--to", target]
             return Built(shellString: shellJoin(argv), argv: argv)
 
         case .secureField, .narration:
@@ -86,14 +102,14 @@ nonisolated public enum ReplicateCommand {
             // Replay any URL change via the navigate verb. The agent gets
             // a clean "go to this URL" action regardless of how the user
             // originally got there (typed address, link click, redirect).
-            let argv = ["act", "navigate", "--url", url]
+            let argv = ["do", "navigate", "--url", url]
             return Built(shellString: shellJoin(argv), argv: argv)
 
         case .newTab(let url):
             // Open a new tab via Cmd+T then navigate. Two-step replay
             // captured as a single argv string so the agent doesn't have
             // to model "tab management" semantics.
-            let argv = ["act", "navigate", "--url", url, "--new-tab"]
+            let argv = ["do", "navigate", "--url", url, "--new-tab"]
             return Built(shellString: shellJoin(argv), argv: argv)
 
         case .tabSwitch:
